@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     vllm_model_name: str = "VibeVoice-ASR-7B"
     vllm_max_tokens: int = 32768
     vllm_temperature: float = 0.0
+    vllm_top_p: float = 1.0
 
     @property
     def token_hashes(self) -> list[str]:

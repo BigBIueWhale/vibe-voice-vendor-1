@@ -22,6 +22,7 @@ async def process_transcription_job(
             hotwords=job.hotwords,
             max_tokens=config.vllm_max_tokens,
             temperature=config.vllm_temperature,
+            top_p=config.vllm_top_p,
         ):
             if first_chunk:
                 job.status = JobStatus.STREAMING

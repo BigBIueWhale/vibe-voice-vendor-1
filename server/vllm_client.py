@@ -13,6 +13,7 @@ async def stream_transcription(
     hotwords: str | None,
     max_tokens: int,
     temperature: float,
+    top_p: float,
 ) -> AsyncIterator[str]:
     """Stream transcription from vLLM via OpenAI-compatible SSE endpoint."""
     audio_url = f"data:audio/wav;base64,{audio_base64}"
@@ -31,6 +32,7 @@ async def stream_transcription(
         "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "top_p": top_p,
         "stream": True,
     }
 
