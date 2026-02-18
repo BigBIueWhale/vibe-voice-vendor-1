@@ -2,6 +2,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
+from typing import ClassVar
 
 import httpx
 from fastapi import FastAPI
@@ -16,7 +17,7 @@ from server.transcribe import process_transcription_job
 class RequireHTTPSMiddleware:
     """Reject non-HTTPS requests on protected endpoints (checks X-Forwarded-Proto)."""
 
-    _OPEN_PATHS = {"/health"}
+    _OPEN_PATHS: ClassVar[set[str]] = {"/health"}
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app

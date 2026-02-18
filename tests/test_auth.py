@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
-from server.auth import _load_public_key, _load_revoked_tokens, verify_token
+from server.auth import _load_public_key, verify_token
 from server.config import Settings
 
 # Generate a test key pair at module level (fast, in-memory only)

@@ -49,7 +49,7 @@ def main() -> None:
 
     token = jwt.encode(
         {"sub": subject, "jti": uuid.uuid4().hex},
-        private_key,  # type: ignore[arg-type]
+        private_key,
         algorithm="ES256",
     )
 

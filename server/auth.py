@@ -29,7 +29,7 @@ def _get_settings(request: Request) -> Settings:
 
 def _load_revoked_tokens(filepath: str) -> frozenset[str]:
     """Load revoked JTI values from file, with a 30-second cache."""
-    global _revocation_cache  # noqa: PLW0603
+    global _revocation_cache
     now = time.monotonic()
     cached_at, cached_set = _revocation_cache
     if now - cached_at < _REVOCATION_CACHE_TTL:

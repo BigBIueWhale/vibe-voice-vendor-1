@@ -6,8 +6,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from server.app import create_app
 import server.auth
+from server.app import create_app
 from server.auth import _load_public_key
 from server.config import Settings
 
