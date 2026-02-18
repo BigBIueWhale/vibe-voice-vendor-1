@@ -83,6 +83,29 @@ sudo ufw allow 443/tcp
 sudo ufw allow 80/tcp  # For ACME challenge
 ```
 
+## Client Installation
+
+The `vvv` CLI is included in the project. Install it on any client machine with [uv](https://docs.astral.sh/uv/):
+
+```bash
+# Clone the repo
+git clone <repo-url>
+cd vibe-voice-vendor
+
+# Install (creates the vvv command)
+uv sync --no-dev
+
+# Verify it works
+uv run vvv --help
+```
+
+If you want `vvv` available globally without the `uv run` prefix, install the package into an isolated tool environment:
+
+```bash
+uv tool install .
+vvv --help
+```
+
 ## Client Usage
 
 ### CLI
