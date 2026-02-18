@@ -5,7 +5,7 @@ Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://g
 ## Architecture
 
 ```
-Internet (HTTPS :443) -> Caddy (auto-TLS) -> FastAPI (:8080 localhost) -> vLLM (:8000 localhost)
+Internet (HTTPS :7853) -> vvv_proxy (self-signed TLS) -> FastAPI (:8080 127.0.0.1) -> vLLM (:8000 127.0.0.1)
 ```
 
 ## Quick Start (Development)
@@ -59,13 +59,14 @@ cp deploy/env.example .env
 # Edit .env with your values
 ```
 
-### 3. Install Caddy
+### 3. Build the TLS reverse proxy
+
+No global installs required. The proxy generates self-signed certificates automatically on first run.
 
 ```bash
-sudo apt install -y caddy
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-# Edit /etc/caddy/Caddyfile: set your domain and email
-sudo systemctl enable --now caddy
+cd /opt/vibe-voice-vendor/rust_proxy
+cargo build --release
+# Binary is at: target/release/vvv_proxy
 ```
 
 ### 4. Start the server via systemd
@@ -76,11 +77,19 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now vibevoice-server
 ```
 
-### 5. Open firewall
+### 5. Start the TLS proxy
 
 ```bash
-sudo ufw allow 443/tcp
-sudo ufw allow 80/tcp  # For ACME challenge
+cd /opt/vibe-voice-vendor/rust_proxy
+./target/release/vvv_proxy
+# Listens on https://0.0.0.0:7853, proxies to http://127.0.0.1:8080
+# Self-signed cert auto-generated at certs/self-signed/
+```
+
+### 6. Open firewall
+
+```bash
+sudo ufw allow 7853/tcp
 ```
 
 ## Client Installation
@@ -112,16 +121,16 @@ vvv --help
 
 ```bash
 # Transcribe a file
-vvv --server https://asr.example.com --token YOUR_TOKEN transcribe recording.mp3
+vvv --server https://your-server:7853 --token YOUR_TOKEN transcribe recording.mp3
 
 # With hotwords
-vvv --server https://asr.example.com --token YOUR_TOKEN transcribe recording.mp3 --hotwords "VibeVoice,ASR"
+vvv --server https://your-server:7853 --token YOUR_TOKEN transcribe recording.mp3 --hotwords "VibeVoice,ASR"
 
 # Save to file
-vvv --server https://asr.example.com --token YOUR_TOKEN transcribe recording.mp3 --output transcript.txt
+vvv --server https://your-server:7853 --token YOUR_TOKEN transcribe recording.mp3 --output transcript.txt
 
 # Check queue status
-vvv --server https://asr.example.com --token YOUR_TOKEN status
+vvv --server https://your-server:7853 --token YOUR_TOKEN status
 ```
 
 ### Python Library
@@ -133,7 +142,7 @@ from client.models import EventType
 
 async def main():
     client = VibevoiceClient(
-        base_url="https://asr.example.com",
+        base_url="https://your-server:7853",
         token="YOUR_TOKEN",
     )
 

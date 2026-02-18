@@ -1,0 +1,47 @@
+[package]
+name = "vvv_proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Self-contained TLS reverse proxy for VibeVoice ASR server"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Web framework and HTTPS server
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
+# HTTP client for proxying requests to upstream
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# WebSocket client for proxying WS connections to upstream
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+# TLS primitives
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# Self-signed certificate generation and expiry checking
+rcgen = "0.13"
+x509-parser = "0.17"
+time = "0.3"
+hostname = "0.4"
+
+# Middleware
+tower-http = { version = "0.6", features = ["limit"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async stream utilities for WebSocket bidirectional forwarding
+futures = "0.3"
+
+# Body collection for HTTP proxying
+http-body-util = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
