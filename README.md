@@ -107,13 +107,13 @@ systemctl --user status vibevoice-proxy
 
 ```bash
 # Transcribe a file
-vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe recording.mp3
+vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe sample/recording_with_hebrew.wav
 
 # With hotwords
-vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe recording.mp3 --hotwords "VibeVoice,ASR"
+vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe sample/recording_with_hebrew.wav --hotwords "VibeVoice,ASR"
 
 # Save to file
-vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe recording.mp3 --output transcript.txt
+vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure transcribe sample/recording_with_hebrew.wav --output transcript.txt
 
 # Check queue status
 vvv --server https://rtx5090:42862 --token YOUR_TOKEN --insecure status
@@ -135,7 +135,7 @@ async def main():
         verify="certs/self-signed/fullchain.pem",
     )
 
-    async for event in client.transcribe("recording.mp3"):
+    async for event in client.transcribe("sample/recording_with_hebrew.wav"):
         if event.event_type == EventType.QUEUE:
             print(f"Queue position: {event.position}")
         elif event.event_type == EventType.DATA:
@@ -153,6 +153,31 @@ asyncio.run(main())
 | POST | `/v1/transcribe` | Yes | Upload audio + stream transcription via SSE |
 | GET | `/v1/queue/status` | Yes | Get your queue position and job status |
 | GET | `/health` | No | Server + vLLM health check |
+
+### curl
+
+```bash
+# Health check (no auth required)
+curl -sk https://rtx5090:42862/health
+# {"status":"ok","vllm":"ok"}
+
+# Queue status
+curl -sk -H "Authorization: Bearer $TOKEN" https://rtx5090:42862/v1/queue/status
+# {"your_jobs":[],"total_queued":0}
+
+# Transcribe (streams SSE events)
+curl -sk -N -H "Authorization: Bearer $TOKEN" \
+  -F "audio=@sample/recording_with_hebrew.wav" \
+  https://rtx5090:42862/v1/transcribe
+
+# Transcribe with hotwords
+curl -sk -N -H "Authorization: Bearer $TOKEN" \
+  -F "audio=@sample/recording_with_hebrew.wav" \
+  -F "hotwords=VibeVoice,ASR" \
+  https://rtx5090:42862/v1/transcribe
+```
+
+`-s` silences progress, `-k` skips TLS verification for the self-signed certificate, `-N` disables output buffering for streaming.
 
 ## Configuration
 
