@@ -13,7 +13,7 @@ TEST_TOKEN_HASH = bcrypt.hashpw(
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
-        vllm_base_url="http://localhost:9999",
+        vllm_base_url="http://127.0.0.1:9999",
         token_hashes_env=TEST_TOKEN_HASH,
         max_queue_size=5,
     )

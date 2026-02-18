@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     model_config = {"env_prefix": "VVV_"}
 
-    vllm_base_url: str = "http://localhost:8000"
+    vllm_base_url: str = "http://127.0.0.1:8000"
     server_host: str = "127.0.0.1"
     server_port: int = 8080
     max_audio_bytes: int = 500 * 1024 * 1024  # 500 MB

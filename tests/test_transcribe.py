@@ -47,7 +47,7 @@ def _make_wav(sample_rate: int = 16000, num_samples: int = 16000) -> bytes:
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
-        vllm_base_url="http://mock-vllm:8000",
+        vllm_base_url="http://127.0.0.1:8000",
         token_hashes_env=TEST_TOKEN_HASH,
         max_queue_size=5,
     )
