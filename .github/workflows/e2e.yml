@@ -27,18 +27,13 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Generate auth token
+      - name: Generate auth key pair and token
         id: auth
         run: |
-          OUTPUT=$(uv run python -m scripts.generate_token)
-          TOKEN=$(echo "$OUTPUT" | grep 'Token' | sed 's/.*:  //')
+          OUTPUT=$(uv run python -m scripts.generate_token --keys-dir "${{ runner.temp }}/keys" --subject ci-test)
+          TOKEN=$(echo "$OUTPUT" | grep 'Token:' | sed 's/.*Token:[[:space:]]*//')
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-          # Bcrypt hashes contain $ signs — use heredoc delimiter
-          {
-            echo 'hash<<HASH_EOF'
-            echo "$OUTPUT" | grep 'Hash' | sed 's/.*:  //'
-            echo 'HASH_EOF'
-          } >> "$GITHUB_OUTPUT"
+          echo "public_key=${{ runner.temp }}/keys/public.pem" >> "$GITHUB_OUTPUT"
 
       - name: Generate test audio (1s tone FLAC)
         run: ffmpeg -y -f lavfi -i "sine=frequency=440:duration=1" -ar 16000 -ac 1 test_audio.flac
@@ -48,7 +43,7 @@ jobs:
 
       - name: Start VVV server
         env:
-          VVV_TOKEN_HASHES_ENV: ${{ steps.auth.outputs.hash }}
+          VVV_JWT_PUBLIC_KEY_FILE: ${{ steps.auth.outputs.public_key }}
           VVV_VLLM_BASE_URL: http://127.0.0.1:${{ env.MOCK_VLLM_PORT }}
           VVV_SERVER_PORT: ${{ env.VVV_PORT }}
         run: uv run python -m server &

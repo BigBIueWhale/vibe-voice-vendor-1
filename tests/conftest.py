@@ -1,20 +1,38 @@
-import bcrypt
+import uuid
+from pathlib import Path
+
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from server.app import create_app
+import server.auth
+from server.auth import _load_public_key
 from server.config import Settings
 
-TEST_TOKEN = "test-token-for-unit-tests-1234"
-TEST_TOKEN_HASH = bcrypt.hashpw(
-    TEST_TOKEN.encode("utf-8"), bcrypt.gensalt(rounds=4)
-).decode("utf-8")
+_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_PUBLIC_PEM = _PRIVATE_KEY.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+)
+
+TEST_TOKEN = pyjwt.encode(
+    {"sub": "test-user", "jti": uuid.uuid4().hex},
+    _PRIVATE_KEY,
+    algorithm="ES256",
+)
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path: Path) -> Settings:
+    _load_public_key.cache_clear()
+    server.auth._revocation_cache = (0.0, frozenset())
+    key_file = tmp_path / "public.pem"
+    key_file.write_bytes(_PUBLIC_PEM)
     return Settings(
         vllm_base_url="http://127.0.0.1:9999",
-        token_hashes_env=TEST_TOKEN_HASH,
+        jwt_public_key_file=str(key_file),
         max_queue_size=5,
     )
 

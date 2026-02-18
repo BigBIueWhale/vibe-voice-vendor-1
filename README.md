@@ -1,6 +1,6 @@
 # VibeVoice ASR Server
 
-Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://github.com/microsoft/VibeVoice) model. Single-request processing via an async queue, SSE streaming, zero data storage, TLS encryption, bearer token auth.
+Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://github.com/microsoft/VibeVoice) model. Single-request processing via an async queue, SSE streaming, zero data storage, TLS encryption, JWT bearer auth (ES256).
 
 ## Architecture
 
@@ -18,7 +18,7 @@ uv sync
 uv run python -m scripts.generate_token
 
 # Set environment variables
-export VVV_TOKEN_HASHES_ENV='<hash from above>'
+export VVV_JWT_PUBLIC_KEY_FILE='keys/public.pem'
 export VVV_VLLM_BASE_URL='http://localhost:37845'
 
 # Start the server
@@ -60,12 +60,12 @@ cd /opt/vibe-voice-vendor
 git clone <repo-url> .
 uv sync --no-dev
 
-# Generate tokens
+# Generate key pair and token
 uv run python -m scripts.generate_token
-# Copy the hash to .env
+# Note the public key path for .env
 
 cp deploy/env.example .env
-# Edit .env with your values
+# Edit .env with your values (set VVV_JWT_PUBLIC_KEY_FILE)
 ```
 
 ### 3. Build the TLS reverse proxy
@@ -175,9 +175,17 @@ All configuration via environment variables with `VVV_` prefix. See `deploy/env.
 ## Token Management
 
 ```bash
-# Generate a new token
+# Generate a key pair and token (first run creates keys/ directory)
 uv run python -m scripts.generate_token
 
-# Add the hash to VVV_TOKEN_HASHES_ENV (comma-separated for multiple tokens)
-# Restart the server to pick up new tokens
+# Generate a token for a specific user
+uv run python -m scripts.generate_token --subject alice
+
+# Point the server at the public key
+export VVV_JWT_PUBLIC_KEY_FILE=keys/public.pem
+
+# To revoke a token, decode its JTI and add it to a revocation file:
+# python -c "import jwt; print(jwt.decode('TOKEN', options={'verify_signature': False})['jti'])"
+# echo "JTI_VALUE" >> revoked.txt
+# export VVV_REVOKED_TOKENS_FILE=revoked.txt
 ```

@@ -9,14 +9,10 @@ class Settings(BaseSettings):
     server_port: int = 54912
     max_audio_bytes: int = 500 * 1024 * 1024  # 500 MB
     max_queue_size: int = 50
-    token_hashes_env: str = ""  # Comma-separated bcrypt hashes
+    jwt_public_key_file: str = ""  # Path to ES256 public key PEM file
+    revoked_tokens_file: str = ""  # Path to file listing revoked JTI values (one per line)
+    require_https: bool = False  # Reject non-HTTPS requests on protected endpoints
     vllm_model_name: str = "vibevoice"
     vllm_max_tokens: int = 65536
     vllm_temperature: float = 0.0
     vllm_top_p: float = 1.0
-
-    @property
-    def token_hashes(self) -> list[str]:
-        if not self.token_hashes_env:
-            return []
-        return [h.strip() for h in self.token_hashes_env.split(",") if h.strip()]

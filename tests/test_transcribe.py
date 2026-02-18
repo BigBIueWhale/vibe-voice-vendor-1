@@ -1,20 +1,33 @@
 import struct
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-import bcrypt
 import httpx
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from httpx import ASGITransport
 
+import server.auth
 from server.app import create_app
+from server.auth import _load_public_key
 from server.config import Settings
 from server.queue import TranscriptionQueue
 
-TEST_TOKEN = "test-token-for-unit-tests-1234"
-TEST_TOKEN_HASH = bcrypt.hashpw(
-    TEST_TOKEN.encode("utf-8"), bcrypt.gensalt(rounds=4)
-).decode("utf-8")
+_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_PUBLIC_PEM = _PRIVATE_KEY.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+)
+
+TEST_TOKEN = pyjwt.encode(
+    {"sub": "test-user", "jti": uuid.uuid4().hex},
+    _PRIVATE_KEY,
+    algorithm="ES256",
+)
 
 
 def _make_wav(sample_rate: int = 16000, num_samples: int = 16000) -> bytes:
@@ -45,10 +58,14 @@ def _make_wav(sample_rate: int = 16000, num_samples: int = 16000) -> bytes:
 
 
 @pytest.fixture
-def settings() -> Settings:
+def settings(tmp_path: Path) -> Settings:
+    _load_public_key.cache_clear()
+    server.auth._revocation_cache = (0.0, frozenset())
+    key_file = tmp_path / "public.pem"
+    key_file.write_bytes(_PUBLIC_PEM)
     return Settings(
         vllm_base_url="http://127.0.0.1:37845",
-        token_hashes_env=TEST_TOKEN_HASH,
+        jwt_public_key_file=str(key_file),
         max_queue_size=5,
     )
 
@@ -114,3 +131,62 @@ async def test_transcribe_empty_audio(settings: Settings) -> None:
             files={"audio": ("test.wav", b"", "audio/wav")},
         )
         assert resp.status_code == 400
+
+
+async def test_https_required_rejects_http(tmp_path: Path) -> None:
+    _load_public_key.cache_clear()
+    server.auth._revocation_cache = (0.0, frozenset())
+    key_file = tmp_path / "public.pem"
+    key_file.write_bytes(_PUBLIC_PEM)
+    https_settings = Settings(
+        vllm_base_url="http://127.0.0.1:37845",
+        jwt_public_key_file=str(key_file),
+        max_queue_size=5,
+        require_https=True,
+    )
+    async with _lifespan_client(https_settings) as client:
+        # No X-Forwarded-Proto header → should be rejected
+        resp = await client.get(
+            "/v1/queue/status",
+            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+        )
+        assert resp.status_code == 403
+        assert "HTTPS" in resp.json()["detail"]
+
+
+async def test_https_required_allows_health(tmp_path: Path) -> None:
+    _load_public_key.cache_clear()
+    server.auth._revocation_cache = (0.0, frozenset())
+    key_file = tmp_path / "public.pem"
+    key_file.write_bytes(_PUBLIC_PEM)
+    https_settings = Settings(
+        vllm_base_url="http://127.0.0.1:37845",
+        jwt_public_key_file=str(key_file),
+        max_queue_size=5,
+        require_https=True,
+    )
+    async with _lifespan_client(https_settings) as client:
+        resp = await client.get("/health")
+        assert resp.status_code == 200
+
+
+async def test_https_required_passes_with_header(tmp_path: Path) -> None:
+    _load_public_key.cache_clear()
+    server.auth._revocation_cache = (0.0, frozenset())
+    key_file = tmp_path / "public.pem"
+    key_file.write_bytes(_PUBLIC_PEM)
+    https_settings = Settings(
+        vllm_base_url="http://127.0.0.1:37845",
+        jwt_public_key_file=str(key_file),
+        max_queue_size=5,
+        require_https=True,
+    )
+    async with _lifespan_client(https_settings) as client:
+        resp = await client.get(
+            "/v1/queue/status",
+            headers={
+                "Authorization": f"Bearer {TEST_TOKEN}",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert resp.status_code == 200

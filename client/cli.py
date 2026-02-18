@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,11 @@ def main() -> None:
     parser.add_argument(
         "--server", required=True, help="Server URL (e.g. https://asr.example.com)"
     )
-    parser.add_argument("--token", required=True, help="Bearer token")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("VVV_TOKEN"),
+        help="Bearer token (default: VVV_TOKEN env var)",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -80,6 +85,10 @@ def main() -> None:
     subparsers.add_parser("status", help="Check queue status")
 
     args = parser.parse_args()
+
+    if not args.token:
+        print("Error: provide --token or set VVV_TOKEN env var", file=sys.stderr)
+        sys.exit(1)
 
     client = VibevoiceClient(base_url=args.server, token=args.token)
 
