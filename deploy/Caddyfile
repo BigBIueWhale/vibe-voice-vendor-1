@@ -1,0 +1,22 @@
+{$VVV_DOMAIN:asr.example.com} {
+    # Auto-TLS via Let's Encrypt
+    tls {$VVV_TLS_EMAIL:admin@example.com}
+
+    # Zero logging
+    log {
+        output discard
+    }
+
+    # Security headers
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+    }
+
+    # Reverse proxy to FastAPI (SSE-friendly)
+    reverse_proxy localhost:8080 {
+        flush_interval -1
+    }
+}
