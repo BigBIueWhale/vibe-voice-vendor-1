@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=vibevoice
-Group=vibevoice
+User=user
+Group=user
 WorkingDirectory=/opt/vibe-voice-vendor
 EnvironmentFile=/opt/vibe-voice-vendor/.env
 ExecStart=/opt/vibe-voice-vendor/.venv/bin/python -m server

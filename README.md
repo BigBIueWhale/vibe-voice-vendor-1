@@ -43,9 +43,7 @@ docker run --gpus all -p 8000:8000 \
 ### 2. Install the ASR server
 
 ```bash
-sudo useradd -r -s /bin/false vibevoice
 sudo mkdir -p /opt/vibe-voice-vendor
-sudo chown vibevoice:vibevoice /opt/vibe-voice-vendor
 
 cd /opt/vibe-voice-vendor
 git clone <repo-url> .
@@ -84,12 +82,6 @@ cd /opt/vibe-voice-vendor/rust_proxy
 ./target/release/vvv_proxy
 # Listens on https://0.0.0.0:7853, proxies to http://127.0.0.1:8080
 # Self-signed cert auto-generated at certs/self-signed/
-```
-
-### 6. Open firewall
-
-```bash
-sudo ufw allow 7853/tcp
 ```
 
 ## Client Installation
