@@ -33,7 +33,7 @@ uv run python -m server
 docker run --gpus all -p 8000:8000 \
   --name vibevoice-vllm \
   --restart unless-stopped \
-  vllm/vllm-openai:latest \
+  vllm/vllm-openai:v0.15.1 \
   --model microsoft/VibeVoice-ASR-7B \
   --tensor-parallel-size 1 \
   --max-model-len 32768 \
