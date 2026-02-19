@@ -41,7 +41,7 @@ docker run -d --gpus all --name vibevoice-vllm \
       --trust-remote-code \
       --dtype bfloat16 \
       --max-num-seqs 64 \
-      --max-model-len 65536 \
+      --max-model-len 48000 \
       --gpu-memory-utilization 0.90 \
       --no-enable-prefix-caching \
       --enable-chunked-prefill \
@@ -54,7 +54,11 @@ docker run -d --gpus all --name vibevoice-vllm \
 docker logs -f vibevoice-vllm
 ```
 
-We replicate the steps from VibeVoice's `start_server.py` but override `--gpu-memory-utilization` from `0.8` to `0.90`. The model weights take 18.22 GiB and the KV cache takes the rest. At `0.98` the KV cache consumes nearly all remaining VRAM, leaving no headroom for the audio encoder's forward pass (~700 MiB peak for long audio), which causes OOM on files longer than ~1 minute. At `0.90` the KV cache still holds ~70K+ tokens (enough for 60-minute audio) while leaving ~3 GiB free for the encoder.
+We override two flags from VibeVoice's `start_server.py`:
+
+- **`--gpu-memory-utilization 0.90`** (upstream default `0.8`): The model weights take 18.22 GiB. vLLM pre-allocates KV cache from whatever VRAM remains within the utilization budget, and anything outside the budget stays free for the audio encoder's forward pass (~700 MiB peak for long audio). At `0.98` the KV cache consumed nearly all remaining VRAM, causing OOM on files longer than ~1 minute. At `0.90` roughly 3 GiB stays free for the encoder.
+
+- **`--max-model-len 48000`** (upstream default `65536`): With `0.90` utilization only ~2.6 GiB is available for KV cache, enough for ~48K tokens but not 65K. This is still sufficient for 60-minute audio: 60min × 60s × 24kHz / 3200 compression ratio = ~27K audio tokens, plus ~16K output tokens = ~43K total.
 
 Pinned versions: VibeVoice at `1807b858`, vLLM at `v0.14.1`. The VibeVoice plugin requires specific vLLM multimodal APIs (`PromptUpdateDetails`, `MultiModalKwargsItems`, `AudioMediaIO`) that only exist in `v0.11.1`–`v0.14.1`. The `VibeVoice/` directory is in `.gitignore`.
 

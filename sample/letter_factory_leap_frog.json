@@ -1,0 +1,231 @@
+[
+  {
+    "Start": 0.0,
+    "End": 3.01,
+    "Content": "[Silence]"
+  },
+  {
+    "Start": 3.01,
+    "End": 12.14,
+    "Speaker": 0,
+    "Content": "The A says, Ah! The A says, Ah! Every letter makes a sound, the A says."
+  },
+  {
+    "Start": 12.14,
+    "End": 22.45,
+    "Speaker": 0,
+    "Content": "Ah! And the B says, Buh! The B says, Buh! Every letter makes a sound, the B says."
+  },
+  {
+    "Start": 23.81,
+    "End": 32.38,
+    "Speaker": 0,
+    "Content": "The C says, Cuh! The C says, Cuh! Every letter makes a sound, the C says."
+  },
+  {
+    "Start": 33.27,
+    "End": 41.82,
+    "Speaker": 0,
+    "Content": "The D says, Duh! The D says, Duh! Every letter makes a sound, the D says."
+  },
+  {
+    "Start": 41.82,
+    "End": 44.34,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 44.34,
+    "End": 53.09,
+    "Speaker": 0,
+    "Content": "The E says, Eh! The E says, Eh! Every letter makes a sound, the E says."
+  },
+  {
+    "Start": 53.09,
+    "End": 55.21,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 55.21,
+    "End": 63.88,
+    "Speaker": 0,
+    "Content": "The F says, Fuh! The F says, Fuh! Every letter makes a sound, the F says."
+  },
+  {
+    "Start": 63.88,
+    "End": 67.21,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 67.21,
+    "End": 75.88,
+    "Speaker": 0,
+    "Content": "The G says, Ghh! The G says, Ghh! Every letter makes a sound, the G says."
+  },
+  {
+    "Start": 75.88,
+    "End": 79.11,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 79.11,
+    "End": 87.78,
+    "Speaker": 0,
+    "Content": "The H says, Huh! The H says, Huh! Every letter makes a sound, the H says."
+  },
+  {
+    "Start": 87.78,
+    "End": 90.58,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 90.58,
+    "End": 99.38,
+    "Speaker": 0,
+    "Content": "The I says, I! The I says, I! Every letter makes a sound, the I says."
+  },
+  {
+    "Start": 100.76,
+    "End": 110.35,
+    "Speaker": 0,
+    "Content": "J! The J says, Juh! The J says, Juh! Every letter makes a sound, the J says."
+  },
+  {
+    "Start": 110.35,
+    "End": 113.71,
+    "Speaker": 1,
+    "Content": "J! Wow! K."
+  },
+  {
+    "Start": 113.71,
+    "End": 122.47,
+    "Speaker": 0,
+    "Content": "The K says, Kuh! The K says, Kuh! Every letter makes a sound, the K says."
+  },
+  {
+    "Start": 123.46,
+    "End": 124.78,
+    "Speaker": 1,
+    "Content": "L."
+  },
+  {
+    "Start": 125.41,
+    "End": 133.85,
+    "Speaker": 0,
+    "Content": "The L says, L! The L says, L! Every letter makes a sound, the L says."
+  },
+  {
+    "Start": 133.85,
+    "End": 135.16,
+    "Speaker": 1,
+    "Content": "Oh!"
+  },
+  {
+    "Start": 135.16,
+    "End": 137.53,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 137.53,
+    "End": 146.05,
+    "Speaker": 0,
+    "Content": "The M says, Mmm! The M says, Mmm! Every letter makes a sound, the M says."
+  },
+  {
+    "Start": 146.05,
+    "End": 147.7,
+    "Speaker": 1,
+    "Content": "Mmm!"
+  },
+  {
+    "Start": 147.7,
+    "End": 156.44,
+    "Speaker": 0,
+    "Content": "The N says, Nnnn! The N says, Nnnn! Every letter makes a sound, the N says."
+  },
+  {
+    "Start": 156.44,
+    "End": 158.46,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 158.46,
+    "End": 168.0,
+    "Speaker": 0,
+    "Content": "But the O says, Ah! The O says, Ah! Every letter makes a sound, the O says."
+  },
+  {
+    "Start": 168.0,
+    "End": 172.03,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 172.03,
+    "End": 180.88,
+    "Speaker": 0,
+    "Content": "The P says, Puh! The P says, Puh! Every letter makes a sound, the P says."
+  },
+  {
+    "Start": 181.0,
+    "End": 191.11,
+    "Speaker": 0,
+    "Content": "Now let's review. The Q says, Quh! The Q says, Quh! Every letter makes a sound, the Q says."
+  },
+  {
+    "Start": 191.11,
+    "End": 193.8,
+    "Speaker": 1,
+    "Content": "Quack! Ah!"
+  },
+  {
+    "Start": 193.8,
+    "End": 202.44,
+    "Speaker": 0,
+    "Content": "The R says, Rrrr! The R says, Rrrr! Every letter makes a sound, the R says."
+  },
+  {
+    "Start": 202.44,
+    "End": 205.45,
+    "Speaker": 1,
+    "Content": "Rrrr! Rrrr!"
+  },
+  {
+    "Start": 205.45,
+    "End": 214.25,
+    "Speaker": 0,
+    "Content": "The S says, Sss! The S says, Sss! Every letter makes a sound, the S says."
+  },
+  {
+    "Start": 214.25,
+    "End": 218.83,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 218.83,
+    "End": 227.56,
+    "Speaker": 0,
+    "Content": "The T says, Tuh! The T says, Tuh! Every letter makes a sound, the T says."
+  },
+  {
+    "Start": 227.56,
+    "End": 229.82,
+    "Content": "[Music]"
+  },
+  {
+    "Start": 229.82,
+    "End": 243.75,
+    "Speaker": 0,
+    "Content": "The U says, Uh! The U says, Uh! Every letter makes a sound, the U says. Uh! The V says, Vuh! The V says, Vuh!"
+  },
+  {
+    "Start": 243.8,
+    "End": 247.73,
+    "Speaker": 0,
+    "Content": "Every letter makes a sound, the V says."
+  },
+  {
+    "Start": 247.73,
+    "End": 259.9,
+    "Speaker": 2,
+    "Content": "W! When I play it over here, the room, it starts to shake. In my ear, what I found, it's the sound that you make."
+  }
+]
