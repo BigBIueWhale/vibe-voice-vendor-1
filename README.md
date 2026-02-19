@@ -42,7 +42,7 @@ docker run -d --gpus all --name vibevoice-vllm \
       --dtype bfloat16 \
       --max-num-seqs 64 \
       --max-model-len 65536 \
-      --gpu-memory-utilization 0.98 \
+      --gpu-memory-utilization 0.90 \
       --no-enable-prefix-caching \
       --enable-chunked-prefill \
       --chat-template-content-format openai \
@@ -54,7 +54,7 @@ docker run -d --gpus all --name vibevoice-vllm \
 docker logs -f vibevoice-vllm
 ```
 
-We replicate the steps from VibeVoice's `start_server.py` but override `--gpu-memory-utilization` from `0.8` to `0.98` — the script's default leaves insufficient memory for KV cache blocks after the model (18.22 GiB) and 61-minute audio profiling are loaded.
+We replicate the steps from VibeVoice's `start_server.py` but override `--gpu-memory-utilization` from `0.8` to `0.90`. The model weights take 18.22 GiB and the KV cache takes the rest. At `0.98` the KV cache consumes nearly all remaining VRAM, leaving no headroom for the audio encoder's forward pass (~700 MiB peak for long audio), which causes OOM on files longer than ~1 minute. At `0.90` the KV cache still holds ~70K+ tokens (enough for 60-minute audio) while leaving ~3 GiB free for the encoder.
 
 Pinned versions: VibeVoice at `1807b858`, vLLM at `v0.14.1`. The VibeVoice plugin requires specific vLLM multimodal APIs (`PromptUpdateDetails`, `MultiModalKwargsItems`, `AudioMediaIO`) that only exist in `v0.11.1`–`v0.14.1`. The `VibeVoice/` directory is in `.gitignore`.
 
