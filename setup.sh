@@ -58,7 +58,7 @@ fi
 
 EXPECTED_COMMIT="1807b858"
 ACTUAL_COMMIT=$(git -C VibeVoice rev-parse --short HEAD)
-if [[ "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT"* ]]; then
+if [[ "$EXPECTED_COMMIT" != "$ACTUAL_COMMIT"* ]]; then
     echo "ERROR: VibeVoice is at commit $ACTUAL_COMMIT, expected $EXPECTED_COMMIT"
     echo "  Fix: git -C VibeVoice checkout $EXPECTED_COMMIT"
     exit 1
@@ -158,7 +158,7 @@ while (( TRIES < MAX_TRIES )); do
     if curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:37845/health 2>/dev/null | grep -q 200; then
         break
     fi
-    (( TRIES++ ))
+    (( ++TRIES ))
     sleep 5
 done
 
