@@ -10,33 +10,19 @@ Internet (HTTPS :42862) -> vvv_proxy (self-signed TLS) -> FastAPI (:54912 127.0.
 
 ## Setup
 
-All steps run from `~/Desktop/vibe-voice-vendor` on the `rtx5090` machine as user `user`.
-
-### 1. Clone VibeVoice and build the Docker image
-
-Following [Microsoft's official instructions](https://github.com/microsoft/VibeVoice/blob/main/docs/vibevoice-vllm-asr.md):
+Prerequisites: `docker` (with NVIDIA GPU support), `uv`, `cargo`, `git`, `curl`.
 
 ```bash
-cd ~/Desktop/vibe-voice-vendor
-git clone https://github.com/microsoft/VibeVoice.git --recurse-submodules
-git -C VibeVoice checkout 1807b858
-
-# Build (one-time, downloads ~14 GB model weights)
-docker build -t vibevoice-vllm .
-
-# Run (instant start, no downloads)
-docker run -d --gpus all --name vibevoice-vllm \
-  --ipc=host --restart unless-stopped \
-  -p 127.0.0.1:37845:8000 \
-  vibevoice-vllm:latest
-
-# Watch startup progress
-docker logs -f vibevoice-vllm
+./setup.sh
 ```
 
-The Dockerfile bakes all dependencies — system packages, model weights, pip packages, and generated tokenizer files — into the image at build time. The container starts immediately with no network access required.
+The script handles everything: cloning VibeVoice, building the Docker image (~14 GB model download on first build), installing Python dependencies, generating JWT keys, building the Rust TLS proxy, installing systemd services, and waiting for all health checks to pass.
 
-All vLLM flags are set in `CMD` and can be overridden at runtime:
+On subsequent runs it skips steps that are already done (existing image, existing keys, etc.). Use `--force-rebuild` to force a Docker image rebuild.
+
+## vLLM Tuning
+
+All vLLM flags are set in the Dockerfile `CMD` and can be overridden at runtime:
 
 ```bash
 docker run -d --gpus all --name vibevoice-vllm \
@@ -66,49 +52,6 @@ We override two flags from VibeVoice's `start_server.py`:
 **Known issue — repetition loop on long audio**: On a 7-minute test file (`sample/letter_factory_leap_frog.wav`), the model transcribed correctly up to ~4m20s then degenerated into an infinite repetition loop ("wop wop wop...") on a segment that likely contains music or sound effects. The loop continued until the 48K token limit was exhausted, inflating wall-clock time to 8m31s (most of it spent generating junk tokens). This is a known LLM degeneration pattern, not a server bug — the model lacks a built-in repetition penalty. Short speech-only files transcribe without issue.
 
 Pinned versions: VibeVoice at `1807b858`, vLLM at `v0.14.1`. The VibeVoice plugin requires specific vLLM multimodal APIs (`PromptUpdateDetails`, `MultiModalKwargsItems`, `AudioMediaIO`) that only exist in `v0.11.1`–`v0.14.1`. The `VibeVoice/` directory is in `.gitignore`.
-
-### 2. Install dependencies and generate a token
-
-```bash
-cd ~/Desktop/vibe-voice-vendor
-uv sync --no-dev
-
-# Generate key pair and token
-uv run python -m scripts.generate_token --keys-dir keys --subject user
-
-# Create an empty revocation file
-touch revoked_tokens.txt
-```
-
-The token is saved to `keys/token.txt` for you to copy to your client machine. The `keys/` directory and `revoked_tokens.txt` are in `.gitignore`.
-
-### 3. Build the TLS reverse proxy
-
-```bash
-cd ~/Desktop/vibe-voice-vendor/rust_proxy
-cargo build --release
-```
-
-The binary is at `rust_proxy/target/release/vvv_proxy`. Self-signed certificates are auto-generated on first run at `certs/self-signed/`.
-
-### 4. Install user systemd services
-
-Both services run as user-level systemd units (same pattern as ollama). They start automatically on login.
-
-```bash
-cp deploy/vibevoice-server.service ~/.config/systemd/user/
-cp deploy/vibevoice-proxy.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now vibevoice-server
-systemctl --user enable --now vibevoice-proxy
-```
-
-Verify both are running:
-
-```bash
-systemctl --user status vibevoice-server
-systemctl --user status vibevoice-proxy
-```
 
 ## Client Usage
 
