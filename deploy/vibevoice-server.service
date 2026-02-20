@@ -18,7 +18,7 @@ ExecStart=%h/Desktop/vibe-voice-vendor/.venv/bin/python -m server \
     --vllm-model-name vibevoice \
     --vllm-temperature 0.0 \
     --vllm-top-p 1.0
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

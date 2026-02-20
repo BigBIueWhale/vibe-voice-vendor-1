@@ -16,7 +16,7 @@ ExecStart=%h/Desktop/vibe-voice-vendor/rust_proxy/target/release/vvv_proxy \
     --key-path %h/Desktop/vibe-voice-vendor/certs/self-signed/privkey.pem \
     --cert-validity-days 3650 \
     --cert-check-interval-secs 3600
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
