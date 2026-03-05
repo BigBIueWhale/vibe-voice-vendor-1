@@ -39,6 +39,9 @@ async def transcribe_audio(
         data=data,
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0),
     )
-    response.raise_for_status()
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Groq API error {response.status_code}: {response.text}"
+        )
     result: str = response.json()["text"]
     return result

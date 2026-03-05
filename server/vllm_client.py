@@ -57,7 +57,11 @@ async def stream_transcription(
         json=payload,
         timeout=httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0),
     ) as response:
-        response.raise_for_status()
+        if response.status_code != 200:
+            body = await response.aread()
+            raise RuntimeError(
+                f"vLLM error {response.status_code}: {body.decode('utf-8', errors='replace')}"
+            )
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
                 continue
