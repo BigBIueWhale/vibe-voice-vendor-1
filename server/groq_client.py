@@ -43,5 +43,34 @@ async def transcribe_audio(
         raise RuntimeError(
             f"Groq API error {response.status_code}: {response.text}"
         )
-    result: str = response.json()["text"]
-    return result
+
+    body = response.text
+    try:
+        parsed = response.json()
+    except Exception as e:
+        raise RuntimeError(
+            f"Groq response is not valid JSON: {e}. "
+            f"response_body={body[:500]!r}"
+        ) from None
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"Groq response is {type(parsed).__name__}, expected object. "
+            f"response_body={body[:500]!r}"
+        )
+
+    if "text" not in parsed:
+        raise RuntimeError(
+            f"Groq response missing 'text' key. "
+            f"keys={list(parsed.keys())}, "
+            f"response_body={body[:500]!r}"
+        )
+
+    text = parsed["text"]
+    if not isinstance(text, str):
+        raise RuntimeError(
+            f"Groq response 'text' is {type(text).__name__}, expected string. "
+            f"response_body={body[:500]!r}"
+        )
+
+    return text
