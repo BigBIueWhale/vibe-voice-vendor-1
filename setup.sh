@@ -225,7 +225,7 @@ done
 
 # Step 12: Wait for health
 if [[ "$BACKEND" == "vibevoice" ]]; then
-    echo "Waiting for vLLM to become healthy (this takes ~90 seconds)..."
+    echo "Waiting for vLLM to become healthy (this takes ~2 minutes)..."
     TRIES=0
     MAX_TRIES=36  # 36 * 5s = 3 minutes
     while (( TRIES < MAX_TRIES )); do
