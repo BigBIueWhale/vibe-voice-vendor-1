@@ -49,10 +49,12 @@ if [[ ! -f Dockerfile ]]; then
 fi
 
 # Step 2: Check prerequisites
+# ffprobe is used by server/audio.py:probe_duration on every transcribe request
+# (both backends). ffmpeg is only used by compress_to_opus (groq backend).
 if [[ "$BACKEND" == "vibevoice" ]]; then
-    REQUIRED_CMDS=(docker uv cargo git curl)
+    REQUIRED_CMDS=(docker uv cargo git curl ffprobe)
 else
-    REQUIRED_CMDS=(uv cargo git curl)
+    REQUIRED_CMDS=(uv cargo git curl ffprobe ffmpeg)
 fi
 
 for cmd in "${REQUIRED_CMDS[@]}"; do
@@ -60,20 +62,33 @@ for cmd in "${REQUIRED_CMDS[@]}"; do
         echo "ERROR: '$cmd' not found in PATH"
         echo "  PATH=$PATH"
         echo "  Install instructions:"
-        echo "    docker: https://docs.docker.com/engine/install/ubuntu/"
-        echo "    uv:     curl -LsSf https://astral.sh/uv/install.sh | sh"
-        echo "    cargo:  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        echo "    git:    sudo apt-get install git"
-        echo "    curl:   sudo apt-get install curl"
+        echo "    docker:           https://docs.docker.com/engine/install/ubuntu/"
+        echo "    uv:               curl -LsSf https://astral.sh/uv/install.sh | sh"
+        echo "    cargo:            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        echo "    git:              sudo apt-get install git"
+        echo "    curl:             sudo apt-get install curl"
+        echo "    ffprobe/ffmpeg:   sudo apt-get install ffmpeg"
         exit 1
     fi
 done
 
 if [[ "$BACKEND" == "vibevoice" ]]; then
-    if ! docker info 2>/dev/null | grep -qi nvidia; then
-        echo "ERROR: Docker does not appear to have NVIDIA GPU support"
-        echo "  'docker info' output (GPU-related):"
-        docker info 2>&1 | grep -i -E 'runtime|nvidia|gpu' || echo "  (none found)"
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: Cannot connect to the Docker daemon as the current user (uid=$(id -u))"
+        echo "  Groups: $(id -Gn)"
+        echo "  Most likely cause: this user is not in the 'docker' group."
+        echo "  Fix:"
+        echo "    sudo usermod -aG docker \$USER"
+        echo "    newgrp docker   # or log out and back in"
+        echo "    ./setup.sh"
+        echo "  If the daemon itself is down, check: systemctl status docker"
+        exit 1
+    fi
+    # Scope the nvidia check to .Runtimes so unrelated 'nvidia' substrings
+    # (image names, labels, contexts) elsewhere in `docker info` can't false-positive.
+    if ! docker info --format '{{.Runtimes}}' 2>/dev/null | grep -qw nvidia; then
+        echo "ERROR: Docker does not have the 'nvidia' runtime registered"
+        echo "  Registered runtimes: $(docker info --format '{{.Runtimes}}' 2>/dev/null || echo '(docker info failed)')"
         echo "  Install nvidia-container-toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
         exit 1
     fi
