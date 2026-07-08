@@ -4,11 +4,13 @@ from pydantic import BaseModel
 
 
 class JobStatus(StrEnum):
+    UPLOADING = "uploading"
     QUEUED = "queued"
     PROCESSING = "processing"
     STREAMING = "streaming"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class QueuePositionEvent(BaseModel):

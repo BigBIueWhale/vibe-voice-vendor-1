@@ -51,13 +51,13 @@ class VibevoiceClient:
 
                     async for line in response.aiter_lines():
                         if line.startswith("event: "):
-                            current_event = line[len("event: "):]
+                            current_event = line[len("event: ") :]
                             continue
 
                         if not line.startswith("data: "):
                             continue
 
-                        data_str = line[len("data: "):]
+                        data_str = line[len("data: ") :]
 
                         try:
                             payload = json.loads(data_str)

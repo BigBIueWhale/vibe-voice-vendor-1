@@ -4,9 +4,11 @@ import json
 import stat
 from io import BytesIO
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from scripts.generate_cert import _generate_cert, _RequestHandler
@@ -18,7 +20,7 @@ class _FakeRfile(BytesIO):
 
 def _make_handler(method: str, path: str, body: bytes = b"") -> _RequestHandler:
     """Build a _RequestHandler wired to an in-memory wfile."""
-    handler = _RequestHandler.__new__(_RequestHandler)
+    handler: Any = _RequestHandler.__new__(_RequestHandler)
     handler.command = method
     handler.path = path
     handler.headers = {"Content-Length": str(len(body))}
@@ -28,7 +30,7 @@ def _make_handler(method: str, path: str, body: bytes = b"") -> _RequestHandler:
     handler.client_address = ("127.0.0.1", 0)
     handler.request_version = "HTTP/1.1"
     handler.server = MagicMock()
-    return handler
+    return cast(_RequestHandler, handler)
 
 
 # ── _generate_cert tests ─────────────────────────────────────────────
@@ -87,6 +89,7 @@ def test_key_is_valid_ec(tmp_path: Path) -> None:
     _generate_cert("h", 30, str(tmp_path / "out"))
     key_bytes = (tmp_path / "out" / "privkey.pem").read_bytes()
     key = load_pem_private_key(key_bytes, password=None)
+    assert isinstance(key, ec.EllipticCurvePrivateKey)
     assert key.key_size == 256  # P-256
 
 
@@ -96,7 +99,7 @@ def test_key_is_valid_ec(tmp_path: Path) -> None:
 def test_handler_get_root_serves_html() -> None:
     handler = _make_handler("GET", "/")
     handler.do_GET()
-    raw = handler.wfile.getvalue().decode()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
     assert "200" in raw
     assert "VVV Certificate Generator" in raw
 
@@ -104,19 +107,21 @@ def test_handler_get_root_serves_html() -> None:
 def test_handler_get_unknown_returns_404() -> None:
     handler = _make_handler("GET", "/defaults")
     handler.do_GET()
-    raw = handler.wfile.getvalue().decode()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
     assert "404" in raw
 
 
 def test_handler_post_generate(tmp_path: Path) -> None:
-    payload = json.dumps({
-        "hostname": "test.local",
-        "days": 30,
-        "certs_dir": str(tmp_path / "gen"),
-    }).encode()
+    payload = json.dumps(
+        {
+            "hostname": "test.local",
+            "days": 30,
+            "certs_dir": str(tmp_path / "gen"),
+        }
+    ).encode()
     handler = _make_handler("POST", "/generate", payload)
     handler.do_POST()
-    raw = handler.wfile.getvalue().decode()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
     body = raw.split("\r\n\r\n", 1)[1]
     data = json.loads(body)
     assert "cert_path" in data
@@ -126,14 +131,16 @@ def test_handler_post_generate(tmp_path: Path) -> None:
 def test_handler_post_generate_overwrite(tmp_path: Path) -> None:
     certs_dir = str(tmp_path / "gen")
     _generate_cert("h", 30, certs_dir)
-    payload = json.dumps({
-        "hostname": "h",
-        "days": 30,
-        "certs_dir": certs_dir,
-    }).encode()
+    payload = json.dumps(
+        {
+            "hostname": "h",
+            "days": 30,
+            "certs_dir": certs_dir,
+        }
+    ).encode()
     handler = _make_handler("POST", "/generate", payload)
     handler.do_POST()
-    raw = handler.wfile.getvalue().decode()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
     body = raw.split("\r\n\r\n", 1)[1]
     data = json.loads(body)
     assert "error" in data
@@ -142,5 +149,5 @@ def test_handler_post_generate_overwrite(tmp_path: Path) -> None:
 def test_handler_404() -> None:
     handler = _make_handler("GET", "/nonexistent")
     handler.do_GET()
-    raw = handler.wfile.getvalue().decode()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
     assert "404" in raw

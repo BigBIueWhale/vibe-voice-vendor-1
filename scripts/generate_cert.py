@@ -135,17 +135,19 @@ def _generate_cert(
 
     private_key = ec.generate_private_key(ec.SECP256R1())
 
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-    ])
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+        ]
+    )
 
-    san = x509.SubjectAlternativeName([
-        x509.DNSName(hostname),
-        x509.DNSName("localhost"),
-        x509.IPAddress(
-            __import__("ipaddress").IPv4Address("127.0.0.1")
-        ),
-    ])
+    san = x509.SubjectAlternativeName(
+        [
+            x509.DNSName(hostname),
+            x509.DNSName("localhost"),
+            x509.IPAddress(__import__("ipaddress").IPv4Address("127.0.0.1")),
+        ]
+    )
 
     now = datetime.now(UTC)
     cert = (

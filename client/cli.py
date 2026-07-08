@@ -64,18 +64,12 @@ async def _status(client: VibevoiceClient) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vvv", description="VibeVoice ASR client")
-    parser.add_argument(
-        "--server", required=True, help="Server URL (e.g. https://asr.example.com)"
-    )
-    parser.add_argument(
-        "--token", required=True, help="Bearer token for authentication"
-    )
+    parser.add_argument("--server", required=True, help="Server URL (e.g. https://asr.example.com)")
+    parser.add_argument("--token", required=True, help="Bearer token for authentication")
     parser.add_argument(
         "--insecure", action="store_true", help="Disable TLS certificate verification"
     )
-    parser.add_argument(
-        "--ca-cert", help="Path to CA certificate for self-signed TLS"
-    )
+    parser.add_argument("--ca-cert", help="Path to CA certificate for self-signed TLS")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

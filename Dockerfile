@@ -1,4 +1,7 @@
-FROM vllm/vllm-openai:v0.14.1
+FROM vllm/vllm-openai:v0.14.1@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c
+
+ARG VIBEVOICE_MODEL_REVISION=d0c9efdb8d614685062c04425d91e01b6f37d944
+ENV VIBEVOICE_MODEL_REVISION=${VIBEVOICE_MODEL_REVISION}
 
 # ── Layer 1: System packages ─────────────────────────────────────────
 RUN apt-get update && \
@@ -7,8 +10,12 @@ RUN apt-get update && \
 
 # ── Layer 2: Model weights (~14 GB, cached independently of source) ──
 RUN python3 -c "\
+import os; \
 from huggingface_hub import snapshot_download; \
-snapshot_download('microsoft/VibeVoice-ASR', local_dir='/models/VibeVoice-ASR')"
+snapshot_download( \
+    'microsoft/VibeVoice-ASR', \
+    revision=os.environ['VIBEVOICE_MODEL_REVISION'], \
+    local_dir='/models/VibeVoice-ASR')"
 
 # ── Layer 3: VibeVoice package + tokenizer files ─────────────────────
 COPY VibeVoice/ /build/VibeVoice/

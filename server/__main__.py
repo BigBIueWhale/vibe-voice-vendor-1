@@ -51,9 +51,7 @@ def main() -> None:
     parser.add_argument(
         "--vllm-temperature", type=float, default=0.0, help="Generation temperature"
     )
-    parser.add_argument(
-        "--vllm-top-p", type=float, default=1.0, help="Top-P sampling parameter"
-    )
+    parser.add_argument("--vllm-top-p", type=float, default=1.0, help="Top-P sampling parameter")
     # Groq Whisper options (required when --asr-backend groq)
     parser.add_argument("--groq-api-key", default="", help="Groq API key")
     parser.add_argument(

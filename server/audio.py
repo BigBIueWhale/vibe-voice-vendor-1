@@ -3,7 +3,7 @@ import base64
 import json
 import os
 import tempfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 _MIME_MAP = {
     ".wav": "audio/wav",
@@ -22,6 +22,11 @@ _MIME_MAP = {
 def encode_audio_base64(raw_bytes: bytes) -> str:
     """Base64-encode raw audio bytes without any conversion."""
     return base64.b64encode(raw_bytes).decode("ascii")
+
+
+def encode_audio_file_base64(path: str) -> str:
+    """Base64-encode an audio file at worker time."""
+    return encode_audio_base64(Path(path).read_bytes())
 
 
 def detect_mime_type(filename: str) -> str:
@@ -44,32 +49,42 @@ async def compress_to_opus(raw_bytes: bytes) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".audio") as src:
         src.write(raw_bytes)
         src.flush()
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as dst:
-            dst_path = dst.name
+        return await compress_file_to_opus(src.name)
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-y",
-                "-i", src.name,
-                "-vn",
-                "-ac", "1",
-                "-ar", "16000",
-                "-c:a", "libopus",
-                "-b:a", "64k",
-                dst_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr_data = await process.communicate()
-            if process.returncode != 0:
-                err = stderr_data.decode("utf-8", errors="replace")
-                raise RuntimeError(f"ffmpeg opus compression failed: {err}")
 
-            with open(dst_path, "rb") as f:
-                return f.read()
-        finally:
-            os.unlink(dst_path)
+async def compress_file_to_opus(path: str) -> bytes:
+    """Compress an audio file to OGG/Opus via ffmpeg."""
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as dst:
+        dst_path = dst.name
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-i",
+            path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "64k",
+            dst_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_data = await process.communicate()
+        if process.returncode != 0:
+            err = stderr_data.decode("utf-8", errors="replace")
+            raise RuntimeError(f"ffmpeg opus compression failed: {err}")
+
+        with open(dst_path, "rb") as f:
+            return f.read()
+    finally:
+        os.unlink(dst_path)
 
 
 async def probe_duration(raw_bytes: bytes) -> float:
@@ -81,25 +96,41 @@ async def probe_duration(raw_bytes: bytes) -> float:
     with tempfile.NamedTemporaryFile(suffix=".audio") as tmp:
         tmp.write(raw_bytes)
         tmp.flush()
+        return await probe_duration_file(tmp.name)
 
-        process = await asyncio.create_subprocess_exec(
-            "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            tmp.name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
+
+async def probe_duration_file(path: str) -> float:
+    """Get audio duration in seconds via ffprobe for a file path."""
+    process = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
         error_msg = stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"ffprobe failed: {error_msg}")
 
-    info = json.loads(stdout)
-    if "format" not in info:
+    try:
+        info = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe output is not valid JSON: {exc}") from exc
+
+    if not isinstance(info, dict) or "format" not in info:
         raise RuntimeError("ffprobe output missing 'format' key")
-    if "duration" not in info["format"]:
+    format_info = info["format"]
+    if not isinstance(format_info, dict):
+        raise RuntimeError("ffprobe output 'format' is not an object")
+    if "duration" not in format_info:
         raise RuntimeError("ffprobe could not determine audio duration")
-    return float(info["format"]["duration"])
+    try:
+        return float(format_info["duration"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"ffprobe duration is not numeric: {format_info['duration']!r}") from exc

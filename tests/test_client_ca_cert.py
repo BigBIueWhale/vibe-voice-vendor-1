@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Coroutine
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,8 +32,10 @@ def test_cli_ca_cert_missing_file(tmp_path: Path) -> None:
 
     fake_path = str(tmp_path / "nonexistent.pem")
     with (
-        patch("sys.argv", ["vvv", "--server", "https://x", "--token", "t",
-                           "--ca-cert", fake_path, "status"]),
+        patch(
+            "sys.argv",
+            ["vvv", "--server", "https://x", "--token", "t", "--ca-cert", fake_path, "status"],
+        ),
         pytest.raises(SystemExit) as exc_info,
     ):
         main()
@@ -45,8 +48,20 @@ def test_cli_insecure_and_ca_cert_mutual_exclusion(tmp_path: Path) -> None:
     from client.cli import main
 
     with (
-        patch("sys.argv", ["vvv", "--server", "https://x", "--token", "t",
-                           "--insecure", "--ca-cert", str(ca), "status"]),
+        patch(
+            "sys.argv",
+            [
+                "vvv",
+                "--server",
+                "https://x",
+                "--token",
+                "t",
+                "--insecure",
+                "--ca-cert",
+                str(ca),
+                "status",
+            ],
+        ),
         pytest.raises(SystemExit) as exc_info,
     ):
         main()
@@ -65,14 +80,21 @@ def test_cli_ca_cert_valid_file(tmp_path: Path) -> None:
         original_init(self, *args, **kwargs)  # type: ignore[arg-type]
         captured_clients.append(self)
 
+    def close_and_exit(coro: Coroutine[object, object, object]) -> None:
+        coro.close()
+        raise SystemExit(0)
+
     with (
-        patch("sys.argv", ["vvv", "--server", "https://x", "--token", "t",
-                           "--ca-cert", str(ca), "status"]),
+        patch(
+            "sys.argv",
+            ["vvv", "--server", "https://x", "--token", "t", "--ca-cert", str(ca), "status"],
+        ),
         patch.object(VibevoiceClient, "__init__", spy_init),
-        patch("client.cli.asyncio.run", side_effect=SystemExit(0)),
+        patch("client.cli.asyncio.run", side_effect=close_and_exit),
         pytest.raises(SystemExit),
     ):
         from client.cli import main
+
         main()
 
     assert len(captured_clients) == 1

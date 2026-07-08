@@ -114,9 +114,9 @@ async def test_health_endpoint(tmp_path: Path) -> None:
     s = _make_all_settings(tmp_path, vllm_base_url="http://127.0.0.1:1")
     async with _lifespan_client(s) as client:
         resp = await client.get("/health")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
         data = resp.json()
-        assert data["status"] == "ok"
+        assert data["status"] == "degraded"
         assert data["vllm"] == "unreachable"
 
 
@@ -171,7 +171,7 @@ async def test_https_required_allows_health(tmp_path: Path) -> None:
     https_settings = _make_all_settings(tmp_path, require_https=True)
     async with _lifespan_client(https_settings) as client:
         resp = await client.get("/health")
-        assert resp.status_code == 200
+        assert resp.status_code == 503
 
 
 async def test_https_required_passes_with_header(tmp_path: Path) -> None:

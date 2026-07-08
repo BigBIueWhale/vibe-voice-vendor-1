@@ -26,10 +26,7 @@ async def stream_transcription(
     text_prompt = f"This is a {audio_duration:.2f} seconds audio, "
     if hotwords:
         text_prompt += f"with extra info: {hotwords}\n\n"
-    text_prompt += (
-        "please transcribe it with these keys: "
-        "Start time, End time, Speaker ID, Content"
-    )
+    text_prompt += "please transcribe it with these keys: Start time, End time, Speaker ID, Content"
     content.append({"type": "text", "text": text_prompt})
 
     payload = {
@@ -65,7 +62,7 @@ async def stream_transcription(
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
                 continue
-            data_str = line[len("data: "):]
+            data_str = line[len("data: ") :]
             if data_str.strip() == "[DONE]":
                 return
             try:

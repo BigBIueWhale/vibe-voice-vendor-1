@@ -1,17 +1,26 @@
 import base64
 import shutil
 import struct
+from typing import Any
 
 import pytest
 
-from server.audio import detect_mime_type, encode_audio_base64, probe_duration
+from server.audio import detect_mime_type, encode_audio_base64, probe_duration, probe_duration_file
 
 has_ffprobe = shutil.which("ffprobe") is not None
 
 
-def _make_wav(
-    sample_rate: int = 16000, num_samples: int = 16000, num_channels: int = 1
-) -> bytes:
+class _FakeProcess:
+    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+
+def _make_wav(sample_rate: int = 16000, num_samples: int = 16000, num_channels: int = 1) -> bytes:
     """Create a minimal valid WAV file."""
     bits_per_sample = 16
     byte_rate = sample_rate * num_channels * bits_per_sample // 8
@@ -93,3 +102,27 @@ async def test_probe_duration_half_second() -> None:
 async def test_probe_duration_invalid() -> None:
     with pytest.raises(RuntimeError, match="ffprobe failed"):
         await probe_duration(b"not audio data at all")
+
+
+async def test_probe_duration_rejects_malformed_ffprobe_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(b"not json")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    with pytest.raises(RuntimeError, match="ffprobe output is not valid JSON"):
+        await probe_duration_file("audio.wav")
+
+
+async def test_probe_duration_rejects_non_numeric_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(b'{"format":{"duration":"nope"}}')
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    with pytest.raises(RuntimeError, match="ffprobe duration is not numeric"):
+        await probe_duration_file("audio.wav")

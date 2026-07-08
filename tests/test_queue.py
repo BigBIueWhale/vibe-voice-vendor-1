@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -49,7 +50,7 @@ async def test_worker_processes_job(queue: TranscriptionQueue) -> None:
     queue.set_process_fn(mock_process)
     queue.start_worker()
 
-    job = TranscriptionJob(token_fingerprint="user1111", audio_base64="test_data")
+    job = TranscriptionJob(token_fingerprint="user1111")
     queue.enqueue(job)
 
     # Wait for processing
@@ -62,20 +63,27 @@ async def test_worker_processes_job(queue: TranscriptionQueue) -> None:
     await queue.stop()
 
 
-async def test_worker_clears_audio_after_processing(queue: TranscriptionQueue) -> None:
+async def test_worker_clears_audio_after_processing(
+    queue: TranscriptionQueue,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "upload.audio"
+    audio_path.write_text("big_audio_data")
+
     async def mock_process(job: TranscriptionJob) -> None:
-        await job.chunk_queue.put(None)
+        assert job.require_audio_path() == str(audio_path)
 
     queue.set_process_fn(mock_process)
     queue.start_worker()
 
-    job = TranscriptionJob(token_fingerprint="user1111", audio_base64="big_audio_data")
+    job = TranscriptionJob(token_fingerprint="user1111", audio_path=str(audio_path))
     queue.enqueue(job)
 
     await asyncio.wait_for(job.chunk_queue.get(), timeout=2.0)
     # Give worker time to clean up
     await asyncio.sleep(0.1)
-    assert job.audio_base64 == ""
+    assert job.audio_path is None
+    assert not audio_path.exists()
 
     await queue.stop()
 
@@ -106,3 +114,85 @@ async def test_failed_job_sends_sentinel(queue: TranscriptionQueue) -> None:
     assert job.status == JobStatus.FAILED
 
     await queue.stop()
+
+
+async def test_capacity_counts_uploading_jobs(queue: TranscriptionQueue) -> None:
+    small_queue = TranscriptionQueue(max_size=1)
+    small_queue.reserve(TranscriptionJob(token_fingerprint="user1111"))
+    with pytest.raises(asyncio.QueueFull):
+        small_queue.reserve(TranscriptionJob(token_fingerprint="user2222"))
+
+
+async def test_cancel_queued_job_skips_processing(queue: TranscriptionQueue) -> None:
+    processed: list[str] = []
+
+    async def mock_process(job: TranscriptionJob) -> None:
+        processed.append(job.job_id)
+
+    job = TranscriptionJob(token_fingerprint="user1111")
+    queue.enqueue(job)
+    assert queue.cancel(job.job_id)
+    queue.set_process_fn(mock_process)
+    queue.start_worker()
+
+    sentinel = await asyncio.wait_for(job.chunk_queue.get(), timeout=2.0)
+    assert sentinel is None
+    await asyncio.sleep(0.1)
+    assert processed == []
+    assert job.status == JobStatus.CANCELLED
+
+    await queue.stop()
+
+
+async def test_cancel_processing_job_has_single_terminal_notification(
+    queue: TranscriptionQueue,
+) -> None:
+    started = asyncio.Event()
+
+    async def mock_process(job: TranscriptionJob) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    queue.set_process_fn(mock_process)
+    queue.start_worker()
+
+    job = TranscriptionJob(token_fingerprint="user1111")
+    queue.enqueue(job)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    assert queue.cancel(job.job_id)
+    sentinel = await asyncio.wait_for(job.chunk_queue.get(), timeout=2.0)
+    assert sentinel is None
+    await asyncio.sleep(0.1)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(job.chunk_queue.get(), timeout=0.05)
+    assert job.status == JobStatus.CANCELLED
+    assert job.cleanup_scheduled
+
+    await queue.stop()
+
+
+async def test_stop_cancels_active_process_task(queue: TranscriptionQueue) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def mock_process(job: TranscriptionJob) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    queue.set_process_fn(mock_process)
+    queue.start_worker()
+
+    job = TranscriptionJob(token_fingerprint="user1111")
+    queue.enqueue(job)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    await queue.stop()
+
+    assert cancelled.is_set()
+    assert job.status == JobStatus.CANCELLED
+    assert job.error_message == "Queue stopped"

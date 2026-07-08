@@ -2,8 +2,9 @@ import json
 
 import httpx
 
+from server.audio import encode_audio_file_base64
 from server.config import Settings
-from server.groq_client import transcribe_audio
+from server.groq_client import transcribe_audio_file
 from server.models import JobStatus
 from server.queue import TranscriptionJob
 from server.vllm_client import stream_transcription
@@ -17,11 +18,12 @@ async def process_vibevoice_job(
     """Worker function that processes a job via local vLLM VibeVoice."""
     accumulated = []
     first_chunk = True
+    audio_base64 = encode_audio_file_base64(job.require_audio_path())
     async for chunk in stream_transcription(
         http_client=http_client,
         vllm_base_url=config.vllm_base_url,
         model_name=config.vllm_model_name,
-        audio_base64=job.audio_base64,
+        audio_base64=audio_base64,
         audio_mime=job.audio_mime,
         audio_duration=job.audio_duration_seconds,
         hotwords=job.hotwords,
@@ -39,9 +41,6 @@ async def process_vibevoice_job(
     raw = "".join(accumulated)
     _validate_vibevoice_output(raw, job)
 
-    # Signal end of stream
-    await job.chunk_queue.put(None)
-
 
 def _validate_vibevoice_output(raw: str, job: TranscriptionJob) -> None:
     """Validate VibeVoice model output is parseable JSON segments.
@@ -58,7 +57,7 @@ def _validate_vibevoice_output(raw: str, job: TranscriptionJob) -> None:
             f"audio_duration={job.audio_duration_seconds:.2f}s, "
             f"audio_mime={job.audio_mime}"
         )
-        return
+        raise RuntimeError(job.error_message)
 
     try:
         parsed = json.loads(trimmed)
@@ -70,7 +69,7 @@ def _validate_vibevoice_output(raw: str, job: TranscriptionJob) -> None:
             f"output_length={len(trimmed)}, "
             f"output_preview={preview!r}"
         )
-        return
+        raise RuntimeError(job.error_message) from e
 
     if not isinstance(parsed, list):
         job.error_message = (
@@ -78,7 +77,7 @@ def _validate_vibevoice_output(raw: str, job: TranscriptionJob) -> None:
             f"audio_duration={job.audio_duration_seconds:.2f}s, "
             f"output_preview={trimmed[:500]!r}"
         )
-        return
+        raise RuntimeError(job.error_message)
 
     for i, seg in enumerate(parsed):
         if not isinstance(seg, dict):
@@ -86,14 +85,14 @@ def _validate_vibevoice_output(raw: str, job: TranscriptionJob) -> None:
                 f"VibeVoice segment[{i}] is {type(seg).__name__}, expected object. "
                 f"output_preview={trimmed[:500]!r}"
             )
-            return
+            raise RuntimeError(job.error_message)
         if "Content" not in seg:
             job.error_message = (
                 f"VibeVoice segment[{i}] missing 'Content' key. "
                 f"keys={list(seg.keys())}, "
                 f"output_preview={trimmed[:500]!r}"
             )
-            return
+            raise RuntimeError(job.error_message)
 
 
 async def process_groq_job(
@@ -103,21 +102,15 @@ async def process_groq_job(
 ) -> None:
     """Worker function that processes a job via Groq Whisper API."""
     job.status = JobStatus.STREAMING
-    text = await transcribe_audio(
+    text = await transcribe_audio_file(
         http_client=http_client,
         api_key=config.groq_api_key,
         model_name=config.groq_model_name,
-        audio_base64=job.audio_base64,
-        audio_mime=job.audio_mime,
+        audio_path=job.require_audio_path(),
         hotwords=job.hotwords,
     )
     if text:
         # Wrap in the same JSON segment format that VibeVoice produces,
         # so existing clients that parse [{"Start":..,"End":..,"Content":..}] work.
-        segment = json.dumps(
-            [{"Start": 0, "End": job.audio_duration_seconds, "Content": text}]
-        )
+        segment = json.dumps([{"Start": 0, "End": job.audio_duration_seconds, "Content": text}])
         await job.chunk_queue.put(segment)
-
-    # Signal end of stream
-    await job.chunk_queue.put(None)

@@ -1,17 +1,14 @@
-import base64
-
 import httpx
 
-from server.audio import compress_to_opus
+from server.audio import compress_file_to_opus
 
 
-async def transcribe_audio(
+async def transcribe_audio_file(
     *,
     http_client: httpx.AsyncClient,
     api_key: str,
     model_name: str,
-    audio_base64: str,
-    audio_mime: str,
+    audio_path: str,
     hotwords: str | None,
 ) -> str:
     """Transcribe audio using Groq's Whisper API (OpenAI-compatible endpoint).
@@ -20,8 +17,7 @@ async def transcribe_audio(
     Groq's 25 MB file size limit and reduce upload latency.
     Groq handles the 30-second Whisper windowing internally for longer audio.
     """
-    raw_bytes = base64.b64decode(audio_base64)
-    opus_bytes = await compress_to_opus(raw_bytes)
+    opus_bytes = await compress_file_to_opus(audio_path)
 
     files = {"file": ("audio.ogg", opus_bytes, "audio/ogg")}
     data: dict[str, str] = {
@@ -40,17 +36,14 @@ async def transcribe_audio(
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0),
     )
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Groq API error {response.status_code}: {response.text}"
-        )
+        raise RuntimeError(f"Groq API error {response.status_code}: {response.text}")
 
     body = response.text
     try:
         parsed = response.json()
     except Exception as e:
         raise RuntimeError(
-            f"Groq response is not valid JSON: {e}. "
-            f"response_body={body[:500]!r}"
+            f"Groq response is not valid JSON: {e}. response_body={body[:500]!r}"
         ) from None
 
     if not isinstance(parsed, dict):
