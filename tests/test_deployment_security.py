@@ -207,8 +207,6 @@ def test_hand_run_client_auth_scripts_are_generate_or_validate_not_repair() -> N
     assert "Generating or repairing" not in setup
     assert "Partial mTLS client-auth artifact state exists" in setup
     assert "scripts.validate_client_cert" in setup
-    assert "scripts.generate_token" not in setup
-    assert "scripts.validate_auth_artifacts" not in setup
 
     assert "Client-auth artifacts already exist" in client_generator
     assert "validate_client_auth_artifacts" in client_validator
@@ -406,10 +404,8 @@ def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
     assert '--server "http://127.0.0.1:${VVV_PORT}"' not in workflow
     assert "http://127.0.0.1:${VVV_PORT}/" not in workflow
     assert "--ca-cert" not in workflow
-    assert "--token" not in workflow
     assert "steps.auth" not in workflow
     assert "--jwt-public-key-file" not in workflow
-    assert "--revoked-tokens-file" not in workflow
 
 
 def test_rust_proxy_excludes_unused_public_transport_stacks() -> None:

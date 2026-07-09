@@ -394,12 +394,6 @@ build_and_start_vibevoice_backend() {
 }
 
 ensure_client_auth_artifacts() {
-    local legacy
-    for legacy in keys/private.pem keys/public.pem keys/token.txt revoked_tokens.txt; do
-        [[ ! -e "$legacy" ]] \
-            || die "Obsolete credential artifact exists: $legacy; remove it before setup"
-    done
-
     local client_existing=0
     [[ -e "$CLIENT_CA_CERT" ]] && (( ++client_existing ))
     [[ -e "$CLIENT_CERT" ]] && (( ++client_existing ))

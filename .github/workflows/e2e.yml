@@ -215,7 +215,7 @@ jobs:
             --pinnedpubkey "$CURL_PIN" \
             --cert "${{ runner.temp }}/keys/client-cert.pem" \
             --key "${{ runner.temp }}/keys/client-key.pem" \
-            -H "Authorization: obsolete" \
+            -H "Authorization: forbidden" \
             "https://127.0.0.1:${VVV_PORT}/v1/queue/status")
           [ "$CODE" = "400" ] || { echo "FAIL: expected 400, got $CODE"; exit 1; }
 
