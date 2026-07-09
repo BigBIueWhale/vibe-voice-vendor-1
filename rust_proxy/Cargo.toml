@@ -6,7 +6,7 @@ description = "Self-contained TLS reverse proxy for VibeVoice ASR server"
 
 [dependencies]
 # Async runtime
-tokio = { version = "=1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 # HTTP/1 transport, without a public web framework/router layer
 bytes = "=1.12.1"
@@ -16,7 +16,7 @@ hyper = { version = "=1.10.1", default-features = false, features = ["client", "
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 
 # TLS primitives
-rustls = { version = "=0.23.36", default-features = false, features = ["ring", "std", "logging"] }
+rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "logging"] }
 ring = "=0.17.14"
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging"] }
 
