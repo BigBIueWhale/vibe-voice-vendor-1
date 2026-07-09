@@ -373,6 +373,7 @@ def test_public_proxy_has_no_tokenless_http_routes() -> None:
 def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
     workflow = _read(".github/workflows/e2e.yml")
 
+    assert "workflow_dispatch:" in workflow
     assert "--uds" in workflow
     assert "--require-https true" in workflow
     assert "--require-https false" not in workflow
