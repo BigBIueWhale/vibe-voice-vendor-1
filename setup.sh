@@ -734,6 +734,6 @@ else
     echo "  Server: unix://$BACKEND_SOCKET_HOST"
 fi
 echo "  Proxy:  https://127.0.0.1:$PROXY_PORT"
-echo "  Android Server URL: https://HOST:$PROXY_PORT"
-echo "  Android Server public key pin: $(tr -d '\r\n' < "$SERVER_SPKI_PIN")"
-echo "  Client cert/key: keys/client-cert.pem keys/client-key.pem"
+echo "  Android import bundle:"
+echo "    uv run python -m scripts.generate_client_bundle --server-url https://HOST:$PROXY_PORT --output keys/client-bundle.vvv.json"
+echo "  Replace HOST with this server's IPv4-reachable DNS name or IPv4 address before importing."

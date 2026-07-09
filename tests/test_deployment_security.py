@@ -315,8 +315,10 @@ def test_public_clients_use_exact_server_spki_pin_not_ca_or_hostname_authority()
 
     assert "server-spki-pin.txt" in setup
     assert "server-spki-pin.txt" in docs
-    assert "Android Server public key pin" in setup
-    assert "Android Server public key pin" in docs
+    assert "Android import bundle" in setup
+    assert "scripts.generate_client_bundle" in setup
+    assert "scripts.generate_client_bundle" in docs
+    assert "scripts.generate_client_bundle" in env_example
     assert "pinnedpubkey" in setup
     assert "--pinnedpubkey" in docs
     assert 'printf \'insecure\\npinnedpubkey = "%s"\\ncert = "%s"\\nkey = "%s"\\n\'' in setup

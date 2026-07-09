@@ -24,15 +24,15 @@ Prerequisites: `docker` already usable by the current user (with NVIDIA GPU supp
 
 The script handles everything inside the project boundary: cloning the pinned VibeVoice source, building the Docker image (~14 GB pinned model snapshot on first build), validating GPU passthrough inside that built image with Docker networking disabled, installing Python dependencies, generating or validating local mTLS client artifacts, building the Rust TLS proxy, starting the local backend containers without Docker networking, rendering the systemd user service from the current checkout path, exporting `certs/self-signed/server-spki-pin.txt`, and waiting for strict pinned-key/mTLS health checks to pass.
 
-The public service is IPv4-only by construction: the proxy listens on `0.0.0.0:42862`, not `[::]`, and examples use an IPv4-reachable host or IPv4 address. If you use DNS, publish an A record for this service and do not rely on an AAAA path. The setup output prints the Android fields directly:
+The public service is IPv4-only by construction: the proxy listens on `0.0.0.0:42862`, not `[::]`, and examples use an IPv4-reachable host or IPv4 address. If you use DNS, publish an A record for this service and do not rely on an AAAA path. The Android app is configured by one import bundle:
 
-```text
-Android Server URL: https://HOST:42862
-Android Server public key pin: sha256/...
-Client cert/key: keys/client-cert.pem keys/client-key.pem
+```bash
+uv run python -m scripts.generate_client_bundle \
+  --server-url https://HOST:42862 \
+  --output keys/client-bundle.vvv.json
 ```
 
-`HOST` is only routing. The Android Server public key pin is the server identity. The client cert/key are the client identity.
+Replace `HOST` with this server's IPv4-reachable DNS name or IPv4 address. The generator validates the server URL, exact server public-key pin, client CA, client certificate, and client private key; refuses to overwrite an existing bundle; and writes the bundle as `0600` because it contains private key material. The URL is only routing. The server SPKI pin is the server identity. The client cert/key are the client identity.
 
 `setup.sh` installs services for the checkout you run it from. The checkout path must use plain systemd-safe characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `/`, `@`, `+`, `-`); paths containing spaces, quotes, `$`, `%`, or other punctuation are rejected. Do not move the repository after setup; rerun `./setup.sh` from the new path instead.
 
@@ -225,6 +225,11 @@ uv run python -m scripts.generate_client_cert --certs-dir certs/self-signed --ke
 
 # Validate existing artifacts without modifying them.
 uv run python -m scripts.validate_client_cert --certs-dir certs/self-signed --keys-dir keys
+
+# Create the one-file Android import bundle from validated artifacts.
+uv run python -m scripts.generate_client_bundle \
+  --server-url https://HOST:42862 \
+  --output keys/client-bundle.vvv.json
 ```
 
 ## Service Management
