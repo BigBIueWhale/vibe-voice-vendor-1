@@ -199,6 +199,43 @@ def test_setup_treats_host_prerequisites_as_preconditions() -> None:
     assert "This setup expects Docker access to already work for the current user." in setup
 
 
+def test_setup_has_only_the_current_backend_modes() -> None:
+    setup = _read("setup.sh")
+
+    assert "--backend vibevoice|groq" in setup
+    assert "--backend must be 'vibevoice' or 'groq'" in setup
+    assert "GROQ_API_KEY" in setup
+    assert "--groq-api-key is required when --backend is groq" in setup
+    assert "--client-ca-cert-path" in setup
+    assert "scripts.generate_client_bundle" in setup
+
+
+def test_teardown_removes_installed_runtime_without_destroying_credentials() -> None:
+    teardown = _read("teardown.sh")
+
+    assert "vibevoice-server-container" in teardown
+    assert "vibevoice-vllm" in teardown
+    assert "vibevoice-backend-netns" in teardown
+    assert "vibevoice-vllm:latest" in teardown
+    assert "docker rm -f" in teardown
+    assert "docker image rm" in teardown
+
+    assert ".service" in teardown
+    assert "daemon-reload" in teardown
+    assert "reset-failed" in teardown
+    assert "groq.env" in teardown
+    assert "/tmp/vibevoice-vendor-" in teardown
+    assert "$script_dir/run" not in teardown
+
+    for credential_artifact in [
+        "keys/client-cert.pem",
+        "keys/client-key.pem",
+        "client-bundle.vvv.json",
+        "server-spki-pin.txt",
+    ]:
+        assert credential_artifact not in teardown
+
+
 def test_hand_run_client_auth_scripts_are_generate_or_validate_not_repair() -> None:
     setup = _read("setup.sh")
     client_generator = _read("scripts/generate_client_cert.py")

@@ -1,24 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Stopping services..."
-systemctl --user disable --now vibevoice-proxy 2>/dev/null || true
-systemctl --user disable --now vibevoice-server 2>/dev/null || true
+SERVER_SERVICE="vibevoice-server"
+PROXY_SERVICE="vibevoice-proxy"
+BACKEND_NETNS_CONTAINER="vibevoice-backend-netns"
+SERVER_CONTAINER="vibevoice-server-container"
+VLLM_CONTAINER="vibevoice-vllm"
+VLLM_IMAGE="vibevoice-vllm:latest"
 
-for container in vibevoice-server-container vibevoice-vllm vibevoice-backend-netns; do
-    if docker container inspect "$container" &>/dev/null; then
-        echo "Stopping $container container..."
-        docker stop "$container"
-        docker rm "$container"
+USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
+APP_CONFIG_DIR="$HOME/.config/vibevoice-vendor"
+BACKEND_SOCKET_DIR="/tmp/vibevoice-vendor-$(id -u)"
+
+echo "Stopping installed user services..."
+systemctl --user disable --now "$PROXY_SERVICE" 2>/dev/null || true
+systemctl --user disable --now "$SERVER_SERVICE" 2>/dev/null || true
+
+echo "Removing installed user service units..."
+rm -f \
+    "$USER_SYSTEMD_DIR/${PROXY_SERVICE}.service" \
+    "$USER_SYSTEMD_DIR/${SERVER_SERVICE}.service"
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user reset-failed "$PROXY_SERVICE" "$SERVER_SERVICE" 2>/dev/null || true
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    for container in "$SERVER_CONTAINER" "$VLLM_CONTAINER" "$BACKEND_NETNS_CONTAINER"; do
+        if docker container inspect "$container" >/dev/null 2>&1; then
+            echo "Removing $container container..."
+            docker rm -f "$container"
+        fi
+    done
+
+    if docker image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
+        echo "Removing Docker image $VLLM_IMAGE..."
+        docker image rm "$VLLM_IMAGE"
     fi
-done
+else
+    echo "Docker is unavailable; skipped Docker container and image removal."
+fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-rm -f "$script_dir/run/server.sock"
-rmdir "$script_dir/run" 2>/dev/null || true
-runtime_dir="/tmp/vibevoice-vendor-$(id -u)"
-rm -f "$runtime_dir/server.sock"
-rmdir "$runtime_dir" 2>/dev/null || true
-rm -f "$HOME/.config/vibevoice-vendor/run/server.sock"
+echo "Removing runtime sockets and backend configuration..."
+rm -f "$BACKEND_SOCKET_DIR/server.sock"
+rmdir "$BACKEND_SOCKET_DIR" 2>/dev/null || true
+rm -f "$APP_CONFIG_DIR/run/server.sock"
+rmdir "$APP_CONFIG_DIR/run" 2>/dev/null || true
+rm -f "$APP_CONFIG_DIR/groq.env"
+rmdir "$APP_CONFIG_DIR" 2>/dev/null || true
 
-echo "All services stopped. Run ./setup.sh to start again."
+echo "Teardown complete. Installed user services, runtime containers, runtime sockets, Groq env, and local VibeVoice Docker image were removed."

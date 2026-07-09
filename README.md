@@ -240,12 +240,14 @@ journalctl --user -u vibevoice-proxy -f
 docker logs -f vibevoice-server-container
 docker logs -f vibevoice-vllm
 
-# Restart
-./teardown.sh
-./setup.sh
+# Restart the public proxy only
 systemctl --user restart vibevoice-proxy
 
-# Stop
-systemctl --user stop vibevoice-proxy
+# Reinstall from this checkout
+./setup.sh
+
+# Uninstall the installed runtime
 ./teardown.sh
 ```
+
+`teardown.sh` removes the installed user systemd units, runtime containers, runtime sockets, the Groq backend environment file, and the local `vibevoice-vllm:latest` Docker image. It does not delete the local client/server credential artifacts under `keys/` and `certs/`; rotate those explicitly when the trust material itself should change.
