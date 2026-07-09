@@ -496,6 +496,7 @@ def test_python_runtime_dependencies_are_exactly_pinned() -> None:
     dependencies = [
         *pyproject["project"]["dependencies"],
         *dependency_groups["dev"],
+        *dependency_groups["vibevoice-image"],
     ]
 
     for dependency in dependencies:
@@ -524,6 +525,29 @@ def test_vibevoice_plugin_install_does_not_resolve_unpinned_dependencies() -> No
 
     assert install_command in dockerfile
     assert "pip install --no-cache-dir /build/VibeVoice" not in dockerfile
+
+
+def test_vllm_audio_runtime_dependencies_are_pinned_and_verified() -> None:
+    pyproject = tomllib.loads(_read("pyproject.toml"))
+    image_dependencies = set(pyproject["dependency-groups"]["vibevoice-image"])
+    dockerfile = _read("Dockerfile")
+
+    for dependency in [
+        "librosa==0.11.0",
+        "scipy==1.16.3",
+        "soundfile==0.13.1",
+        "scikit-learn==1.8.0",
+        "soxr==1.0.0",
+        "threadpoolctl==3.6.0",
+    ]:
+        assert dependency in image_dependencies
+
+    assert "import librosa" in dockerfile
+    assert "import scipy.signal" in dockerfile
+    assert "import soundfile" in dockerfile
+    assert "from vllm.multimodal import audio as vllm_audio" in dockerfile
+    assert 'module.__class__.__name__ == "PlaceholderModule"' in dockerfile
+    assert "vLLM audio dependency" in dockerfile
 
 
 def test_vibevoice_ffmpeg_decode_is_bounded_in_runtime_image() -> None:

@@ -190,10 +190,21 @@ RUN pip install --no-cache-dir \
         --output /models/VibeVoice-ASR && \
     rm -rf /build/VibeVoice /tmp/vvv-vibevoice-image-requirements.txt
 from transformers import AutoConfig
+import librosa
+import scipy.signal
+import soundfile
+from vllm.multimodal import audio as vllm_audio
 import vllm_plugin
 
 vllm_plugin.register_vibevoice()
 AutoConfig.from_pretrained("/models/VibeVoice-ASR", trust_remote_code=True)
+for module_name, module in (
+    ("librosa", vllm_audio.librosa),
+    ("soundfile", vllm_audio.soundfile),
+    ("scipy.signal", vllm_audio.scipy_signal),
+):
+    if module.__class__.__name__ == "PlaceholderModule":
+        raise RuntimeError(f"vLLM audio dependency {module_name} is missing")
 PY
 
 # ── Layer 4: Isolated FastAPI server runtime ─────────────────────────
