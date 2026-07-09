@@ -137,7 +137,6 @@ def test_local_backend_host_access_is_only_the_private_uds_mount() -> None:
 
     forbidden_mounts = [
         "keys/private.pem:/",
-        "keys/token.txt:/",
         "$INSTALL_DIR:/",
         "$HOME:/",
         "/:/",
@@ -200,23 +199,16 @@ def test_setup_treats_host_prerequisites_as_preconditions() -> None:
     assert "This setup expects Docker access to already work for the current user." in setup
 
 
-def test_hand_run_auth_scripts_are_generate_or_validate_not_repair() -> None:
+def test_hand_run_client_auth_scripts_are_generate_or_validate_not_repair() -> None:
     setup = _read("setup.sh")
-    token_generator = _read("scripts/generate_token.py")
-    token_validator = _read("scripts/validate_auth_artifacts.py")
     client_generator = _read("scripts/generate_client_cert.py")
     client_validator = _read("scripts/validate_client_cert.py")
 
     assert "Generating or repairing" not in setup
-    assert "Partial JWT artifact state exists" in setup
     assert "Partial mTLS client-auth artifact state exists" in setup
-    assert "scripts.validate_auth_artifacts" in setup
     assert "scripts.validate_client_cert" in setup
-
-    assert "--validate-only" not in token_generator
-    assert "os.O_TRUNC" not in token_generator
-    assert "os.O_EXCL" in token_generator
-    assert "validate_artifacts" in token_validator
+    assert "scripts.generate_token" not in setup
+    assert "scripts.validate_auth_artifacts" not in setup
 
     assert "Client-auth artifacts already exist" in client_generator
     assert "validate_client_auth_artifacts" in client_validator
@@ -365,27 +357,26 @@ def test_user_units_do_not_use_mount_namespace_sandboxing() -> None:
         assert directive not in setup
 
 
-def test_public_proxy_has_no_tokenless_http_routes() -> None:
+def test_public_proxy_uses_mtls_identity_without_application_auth() -> None:
     setup = _read("setup.sh")
     proxy_source = _read("rust_proxy/src/main.rs")
     docs = _read("README.md")
 
-    auth_check = "state.auth_verifier.verify_headers(req.headers())"
-    health_check = 'path == "/health"'
-    assert proxy_source.index(auth_check) < proxy_source.index(health_check)
+    auth_rejection = "req.headers().contains_key(header::AUTHORIZATION)"
+    health_check = 'req.uri().path() == "/health"'
+    assert proxy_source.index(auth_rejection) < proxy_source.index(health_check)
+    assert "client_identity_from_peer_certs" in proxy_source
+    assert "peer_certificates()" in proxy_source
+    assert "CLIENT_IDENTITY_HEADER" in proxy_source
+    assert "state.auth_verifier" not in proxy_source
 
-    assert 'Authorization: Bearer %s' in setup
     assert 'pinnedpubkey = "%s"' in setup
     assert "read_server_pin_for_curl" in setup
-    authenticated_health_curl = (
-        '--config "$tls_config" --config "$auth_config" '
-        '-s -o "$body_file" -w \'%{http_code}\' '
-        '"https://127.0.0.1:${PROXY_PORT}/health"'
-    )
-    assert authenticated_health_curl in setup
+    assert '--config "$tls_config" -s -o "$body_file" -w' in setup
+    assert "auth_config" not in setup
 
     assert "no auth required" not in docs.lower()
-    assert "| GET | `/health` | Yes |" in docs
+    assert "| GET | `/health` | mTLS |" in docs
 
 
 def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
@@ -407,11 +398,16 @@ def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
     assert "--tlsv1.3 --tls-max 1.3" in workflow
     assert "Test: no client certificate is rejected at TLS" in workflow
     assert "Test: wrong server public key pin is rejected client-side" in workflow
+    assert "Test: authorization header rejected" in workflow
     assert "Test: backend UDS rejects direct protected non-HTTPS request" in workflow
 
     assert '--server "http://127.0.0.1:${VVV_PORT}"' not in workflow
     assert "http://127.0.0.1:${VVV_PORT}/" not in workflow
     assert "--ca-cert" not in workflow
+    assert "--token" not in workflow
+    assert "steps.auth" not in workflow
+    assert "--jwt-public-key-file" not in workflow
+    assert "--revoked-tokens-file" not in workflow
 
 
 def test_rust_proxy_excludes_unused_public_transport_stacks() -> None:

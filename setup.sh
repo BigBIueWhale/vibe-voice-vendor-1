@@ -368,8 +368,6 @@ build_and_start_vibevoice_backend() {
         -e PYTHONDONTWRITEBYTECODE=1 \
         -e PYTHONPATH=/opt/vvv-server \
         -v "$BACKEND_SOCKET_DIR:/run/vibevoice" \
-        -v "$INSTALL_DIR/keys/public.pem:/run/vibevoice-auth/public.pem:ro" \
-        -v "$INSTALL_DIR/revoked_tokens.txt:/run/vibevoice-auth/revoked_tokens.txt:ro" \
         --entrypoint /opt/vvv-server-venv/bin/python \
         "$VLLM_IMAGE" \
         -m server \
@@ -378,8 +376,6 @@ build_and_start_vibevoice_backend() {
         --uds "$BACKEND_SOCKET_CONTAINER" \
         --max-audio-bytes "$MAX_AUDIO_BYTES" \
         --max-queue-size "$MAX_QUEUE_SIZE" \
-        --jwt-public-key-file /run/vibevoice-auth/public.pem \
-        --revoked-tokens-file /run/vibevoice-auth/revoked_tokens.txt \
         --require-https true \
         --vllm-model-name vibevoice \
         --vllm-temperature 0.0 \
@@ -397,36 +393,12 @@ build_and_start_vibevoice_backend() {
     done
 }
 
-ensure_auth_artifacts() {
-    local private="keys/private.pem"
-    local public="keys/public.pem"
-    local token="keys/token.txt"
-    local jwt_existing=0
-
-    [[ -e "$private" ]] && (( ++jwt_existing ))
-    [[ -e "$public" ]] && (( ++jwt_existing ))
-    [[ -e "$token" ]] && (( ++jwt_existing ))
-    if (( jwt_existing == 0 )); then
-        echo "Generating JWT key/token artifacts from a clean state..."
-        uv run python -m scripts.generate_token --keys-dir keys --subject user
-    elif (( jwt_existing == 3 )); then
-        echo "Validating existing JWT key/token artifacts..."
-        uv run python -m scripts.validate_auth_artifacts --keys-dir keys
-    else
-        die "Partial JWT artifact state exists; expected all or none of $private, $public, and $token"
-    fi
-
-    if [[ ! -e revoked_tokens.txt ]]; then
-        local old_umask
-        old_umask="$(umask)"
-        umask 077
-        : > revoked_tokens.txt
-        umask "$old_umask"
-    fi
-    [[ -f revoked_tokens.txt && ! -L revoked_tokens.txt ]] \
-        || die "revoked_tokens.txt must be a regular file"
-    [[ "$(stat -c '%a' revoked_tokens.txt)" == "600" ]] \
-        || die "revoked_tokens.txt must have mode 600"
+ensure_client_auth_artifacts() {
+    local legacy
+    for legacy in keys/private.pem keys/public.pem keys/token.txt revoked_tokens.txt; do
+        [[ ! -e "$legacy" ]] \
+            || die "Obsolete credential artifact exists: $legacy; remove it before setup"
+    done
 
     local client_existing=0
     [[ -e "$CLIENT_CA_CERT" ]] && (( ++client_existing ))
@@ -499,8 +471,6 @@ ExecStart=$INSTALL_DIR/.venv/bin/python -m server \\
     --uds $BACKEND_SOCKET_HOST \\
     --max-audio-bytes $MAX_AUDIO_BYTES \\
     --max-queue-size $MAX_QUEUE_SIZE \\
-    --jwt-public-key-file $INSTALL_DIR/keys/public.pem \\
-    --revoked-tokens-file $INSTALL_DIR/revoked_tokens.txt \\
     --require-https true
 Restart=always
 RestartSec=5
@@ -539,8 +509,6 @@ ExecStart=$INSTALL_DIR/rust_proxy/target/release/vvv_proxy \\
     --listen-host 0.0.0.0 \\
     --listen-port $PROXY_PORT \\
     --max-body-size $MAX_REQUEST_BYTES \\
-    --jwt-public-key-file $INSTALL_DIR/keys/public.pem \\
-    --revoked-tokens-file $INSTALL_DIR/revoked_tokens.txt \\
     --cert-path $CERT_DIR/fullchain.pem \\
     --key-path $CERT_DIR/privkey.pem \\
     --server-spki-pin-path $SERVER_SPKI_PIN \\
@@ -580,8 +548,6 @@ ExecStart=$INSTALL_DIR/rust_proxy/target/release/vvv_proxy \\
     --listen-host 0.0.0.0 \\
     --listen-port $PROXY_PORT \\
     --max-body-size $MAX_REQUEST_BYTES \\
-    --jwt-public-key-file $INSTALL_DIR/keys/public.pem \\
-    --revoked-tokens-file $INSTALL_DIR/revoked_tokens.txt \\
     --cert-path $CERT_DIR/fullchain.pem \\
     --key-path $CERT_DIR/privkey.pem \\
     --server-spki-pin-path $SERVER_SPKI_PIN \\
@@ -691,36 +657,29 @@ verify_full_stack() {
     local tls_config
     tls_config="$(mktemp)"
     chmod 600 "$tls_config"
-    local auth_config
-    auth_config="$(mktemp)"
-    chmod 600 "$auth_config"
     local curl_pin
     curl_pin="$(read_server_pin_for_curl)"
-    local token
-    token="$(tr -d '\r\n' < keys/token.txt)"
-    [[ -n "$token" ]] || die "keys/token.txt is empty"
     printf 'insecure\npinnedpubkey = "%s"\ncert = "%s"\nkey = "%s"\n' \
         "$curl_pin" "$CLIENT_CERT" "$CLIENT_KEY" > "$tls_config"
-    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
 
     local code
-    code="$(curl --config "$tls_config" --config "$auth_config" -s -o "$body_file" -w '%{http_code}' "https://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null || echo "000")"
+    code="$(curl --config "$tls_config" -s -o "$body_file" -w '%{http_code}' "https://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null || echo "000")"
     local body
     body="$(cat "$body_file")"
 
     if [[ "$code" != "200" || ! "$body" =~ \"proxy\"[[:space:]]*:[[:space:]]*\"ok\" ]]; then
         echo "Proxy health check failed: HTTP $code $body" >&2
-        rm -f "$body_file" "$tls_config" "$auth_config"
+        rm -f "$body_file" "$tls_config"
         print_backend_debug
         echo "$PROXY_SERVICE status:  $(systemctl --user is-active "$PROXY_SERVICE" 2>/dev/null || true)" >&2
         exit 1
     fi
 
-    code="$(curl --config "$tls_config" --config "$auth_config" -s -o "$body_file" -w '%{http_code}' "https://127.0.0.1:${PROXY_PORT}/v1/queue/status" 2>/dev/null || echo "000")"
+    code="$(curl --config "$tls_config" -s -o "$body_file" -w '%{http_code}' "https://127.0.0.1:${PROXY_PORT}/v1/queue/status" 2>/dev/null || echo "000")"
     body="$(cat "$body_file")"
     if [[ "$code" != "200" || ! "$body" =~ \"your_jobs\" ]]; then
-        echo "Authenticated proxy check failed: HTTP $code $body" >&2
-        rm -f "$body_file" "$tls_config" "$auth_config"
+        echo "mTLS proxy check failed: HTTP $code $body" >&2
+        rm -f "$body_file" "$tls_config"
         print_backend_debug
         echo "$PROXY_SERVICE status:  $(systemctl --user is-active "$PROXY_SERVICE" 2>/dev/null || true)" >&2
         exit 1
@@ -728,7 +687,7 @@ verify_full_stack() {
 
     code="$(backend_health_check "$body_file")"
     body="$(cat "$body_file")"
-    rm -f "$body_file" "$tls_config" "$auth_config"
+    rm -f "$body_file" "$tls_config"
 
     if [[ "$code" != "200" || ! "$body" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]]; then
         echo "Server/backend health check failed: HTTP $code $body" >&2
@@ -750,8 +709,8 @@ stop_existing_services
 
 echo "Installing Python dependencies..."
 uv sync --no-dev
-ensure_auth_artifacts
 prepare_cert_dir
+ensure_client_auth_artifacts
 build_proxy
 
 if [[ "$BACKEND" == "vibevoice" ]]; then
@@ -777,5 +736,4 @@ fi
 echo "  Proxy:  https://127.0.0.1:$PROXY_PORT"
 echo "  Android Server URL: https://HOST:$PROXY_PORT"
 echo "  Android Server public key pin: $(tr -d '\r\n' < "$SERVER_SPKI_PIN")"
-echo "  Token:  keys/token.txt"
 echo "  Client cert/key: keys/client-cert.pem keys/client-key.pem"

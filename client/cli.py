@@ -65,7 +65,6 @@ async def _status(client: VibevoiceClient) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vvv", description="VibeVoice ASR client")
     parser.add_argument("--server", required=True, help="Server URL (e.g. https://asr.example.com)")
-    parser.add_argument("--token", required=True, help="Bearer token for authentication")
     parser.add_argument(
         "--server-pin",
         required=True,
@@ -94,7 +93,6 @@ def main() -> None:
 
     client = VibevoiceClient(
         base_url=args.server,
-        token=args.token,
         server_pin=args.server_pin,
         cert=(args.client_cert, args.client_key),
     )

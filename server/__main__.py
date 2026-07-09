@@ -65,12 +65,6 @@ def main() -> None:
         "--max-queue-size", type=int, required=True, help="Maximum number of queued jobs"
     )
     parser.add_argument(
-        "--jwt-public-key-file", required=True, help="Path to ES256 public key PEM file"
-    )
-    parser.add_argument(
-        "--revoked-tokens-file", required=True, help="Path to file listing revoked JTI values"
-    )
-    parser.add_argument(
         "--require-https",
         type=_parse_bool,
         required=True,
@@ -100,8 +94,6 @@ def main() -> None:
         asr_backend=args.asr_backend,
         max_audio_bytes=args.max_audio_bytes,
         max_queue_size=args.max_queue_size,
-        jwt_public_key_file=args.jwt_public_key_file,
-        revoked_tokens_file=args.revoked_tokens_file,
         require_https=args.require_https,
         vllm_base_url=args.vllm_base_url,
         vllm_model_name=args.vllm_model_name,

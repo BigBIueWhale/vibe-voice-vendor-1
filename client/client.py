@@ -27,20 +27,17 @@ class VibevoiceClient:
     def __init__(
         self,
         base_url: str,
-        token: str,
         server_pin: str,
         cert: ClientCert,
     ) -> None:
         self._base_url = _normalize_base_url(base_url)
         self._url = urlparse(self._base_url)
-        self._token = token
         self._server_pin = _normalize_server_pin(server_pin)
         self._cert = cert
         self._ssl_context = _build_ssl_context(cert)
 
     def _headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self._token}",
             "Host": _host_header(self._url.hostname or "", self._url.port),
             "Connection": "close",
         }
@@ -126,7 +123,7 @@ class VibevoiceClient:
             conn.close()
 
     async def queue_status(self) -> dict[str, object]:
-        """Get queue status for your token."""
+        """Get queue status for the configured client certificate identity."""
         conn = self._connection()
         try:
             conn.request("GET", "/v1/queue/status", headers=self._headers())

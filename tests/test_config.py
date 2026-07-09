@@ -11,8 +11,6 @@ def _settings(**overrides: object) -> Settings:
         "asr_backend": "vibevoice",
         "max_audio_bytes": 1024,
         "max_queue_size": 1,
-        "jwt_public_key_file": "public.pem",
-        "revoked_tokens_file": "revoked.txt",
         "require_https": True,
         "vllm_base_url": "http://127.0.0.1:8000",
         "vllm_model_name": "vibevoice",

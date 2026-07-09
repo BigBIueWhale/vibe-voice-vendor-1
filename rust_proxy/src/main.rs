@@ -9,17 +9,14 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine as _,
-};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
 use clap::Parser;
 use futures::FutureExt;
@@ -31,11 +28,9 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use ring::digest;
-use ring::signature::{self, UnparsedPublicKey};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
-use serde_json::Value;
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixStream};
 use tokio::signal;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -43,8 +38,6 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn, Level};
 use x509_parser::pem::Pem;
-use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo};
-use x509_parser::public_key::PublicKey;
 
 // ============================================================================
 // CLI Arguments (all required, no defaults)
@@ -76,14 +69,6 @@ struct Args {
     /// Maximum request body size in bytes (e.g., 524288000 for 500 MB)
     #[arg(long)]
     max_body_size: usize,
-
-    /// Path to ES256 JWT public key PEM file
-    #[arg(long)]
-    jwt_public_key_file: String,
-
-    /// Path to file listing revoked JWT jti values
-    #[arg(long)]
-    revoked_tokens_file: String,
 
     /// Path to TLS certificate PEM file
     #[arg(long)]
@@ -154,20 +139,6 @@ fn is_hop_by_hop_header(name: &HeaderName, connection_tokens: &HashSet<HeaderNam
 }
 
 // ============================================================================
-// Authentication Limits
-// ============================================================================
-
-const REVOCATION_CACHE_TTL: Duration = Duration::from_secs(30);
-const MAX_AUTHORIZATION_VALUE_BYTES: usize = 8 * 1024;
-const MAX_JWT_DECODED_HEADER_BYTES: usize = 1024;
-const MAX_JWT_DECODED_PAYLOAD_BYTES: usize = 4 * 1024;
-const MAX_JWT_SUB_BYTES: usize = 256;
-const MAX_JWT_JTI_BYTES: usize = 128;
-const ES256_SIGNATURE_BYTES: usize = 64;
-const MAX_REVOCATION_FILE_BYTES: usize = 1024 * 1024;
-const MAX_CONCURRENT_AUTH_VERIFICATIONS: usize = 32;
-
-// ============================================================================
 // Public Transport Limits
 // ============================================================================
 
@@ -181,6 +152,7 @@ const TLS_ALPN_HTTP1: &[u8] = b"http/1.1";
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_CERT_COMMON_NAME: &str = "VVV Sovereign Server";
 const SERVER_SPKI_PIN_PREFIX: &str = "sha256/";
+const CLIENT_IDENTITY_HEADER: &str = "x-vvv-client-spki-sha256";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -259,22 +231,6 @@ fn local_health_response(method: &Method) -> Response<ProxyBody> {
         }
         _ => text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed"),
     }
-}
-
-fn auth_error_response(err: AuthError) -> Response<ProxyBody> {
-    let (status, body) = match err {
-        AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized"),
-        AuthError::Unavailable => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Authentication unavailable",
-        ),
-        AuthError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "Authentication busy"),
-    };
-    let mut response = text_response(status, body);
-    response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-    response
 }
 
 fn make_shared_tls_config(config: rustls::ServerConfig) -> SharedTlsConfig {
@@ -646,286 +602,34 @@ async fn cert_renewal_task(
 }
 
 // ============================================================================
-// JWT Authentication
+// mTLS Client Identity
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum AuthError {
-    Unauthorized,
-    Unavailable,
-    Busy,
+fn spki_sha256_hex_from_cert_der(
+    cert_der: &[u8],
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der)
+        .map_err(|e| format!("invalid X.509 client certificate: {e:?}"))?;
+    let hash = digest::digest(&digest::SHA256, cert.tbs_certificate.subject_pki.raw);
+    Ok(hex_lower(hash.as_ref()))
 }
 
-#[derive(Clone)]
-struct AuthVerifier {
-    public_key: Arc<Vec<u8>>,
-    revoked_tokens_file: Arc<PathBuf>,
-    revocation_cache: Arc<RwLock<RevocationCache>>,
-    verification_permits: Arc<Semaphore>,
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
-struct RevocationCache {
-    loaded_at: Instant,
-    tokens: HashSet<String>,
-}
-
-impl AuthVerifier {
-    fn new(
-        public_key_file: PathBuf,
-        revoked_tokens_file: PathBuf,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let public_key = load_es256_public_key(&public_key_file)?;
-        let revoked_tokens = load_revoked_tokens(&revoked_tokens_file)?;
-
-        Ok(Self {
-            public_key: Arc::new(public_key),
-            revoked_tokens_file: Arc::new(revoked_tokens_file),
-            revocation_cache: Arc::new(RwLock::new(RevocationCache {
-                loaded_at: Instant::now(),
-                tokens: revoked_tokens,
-            })),
-            verification_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_AUTH_VERIFICATIONS)),
-        })
-    }
-
-    fn verify_headers(&self, headers: &HeaderMap) -> Result<String, AuthError> {
-        let token = bearer_token_from_headers(headers)?;
-        self.verify_token(token)
-    }
-
-    fn verify_token(&self, token: &str) -> Result<String, AuthError> {
-        if token.len() > MAX_AUTHORIZATION_VALUE_BYTES {
-            return Err(AuthError::Unauthorized);
-        }
-
-        let mut parts = token.split('.');
-        let encoded_header = parts.next().ok_or(AuthError::Unauthorized)?;
-        let encoded_payload = parts.next().ok_or(AuthError::Unauthorized)?;
-        let encoded_signature = parts.next().ok_or(AuthError::Unauthorized)?;
-        if parts.next().is_some()
-            || encoded_header.is_empty()
-            || encoded_payload.is_empty()
-            || encoded_signature.is_empty()
-        {
-            return Err(AuthError::Unauthorized);
-        }
-
-        let header = decode_json_segment(encoded_header, MAX_JWT_DECODED_HEADER_BYTES)?;
-        validate_jwt_header(&header)?;
-
-        let signature = URL_SAFE_NO_PAD
-            .decode(encoded_signature.as_bytes())
-            .map_err(|_| AuthError::Unauthorized)?;
-        if signature.len() != ES256_SIGNATURE_BYTES {
-            return Err(AuthError::Unauthorized);
-        }
-
-        let payload = decode_json_segment(encoded_payload, MAX_JWT_DECODED_PAYLOAD_BYTES)?;
-        validate_temporal_claims(&payload)?;
-        let sub = required_string_claim(&payload, "sub", MAX_JWT_SUB_BYTES)?;
-        let jti = required_string_claim(&payload, "jti", MAX_JWT_JTI_BYTES)?;
-
-        let signing_input_len = encoded_header.len() + 1 + encoded_payload.len();
-        let signing_input = token
-            .as_bytes()
-            .get(..signing_input_len)
-            .ok_or(AuthError::Unauthorized)?;
-        let _permit = self
-            .verification_permits
-            .try_acquire()
-            .map_err(|_| AuthError::Busy)?;
-        let public_key = UnparsedPublicKey::new(
-            &signature::ECDSA_P256_SHA256_FIXED,
-            self.public_key.as_slice(),
-        );
-        public_key
-            .verify(signing_input, &signature)
-            .map_err(|_| AuthError::Unauthorized)?;
-
-        if self.is_revoked(&jti)? {
-            return Err(AuthError::Unauthorized);
-        }
-
-        Ok(sub)
-    }
-
-    fn is_revoked(&self, jti: &str) -> Result<bool, AuthError> {
-        let now = Instant::now();
-        {
-            let cache = self
-                .revocation_cache
-                .read()
-                .map_err(|_| AuthError::Unavailable)?;
-            if now.duration_since(cache.loaded_at) < REVOCATION_CACHE_TTL {
-                return Ok(cache.tokens.contains(jti));
-            }
-        }
-
-        let tokens = load_revoked_tokens(&self.revoked_tokens_file).map_err(|e| {
-            error!(error = %e, "Failed to load revoked token list");
-            AuthError::Unavailable
-        })?;
-        let revoked = tokens.contains(jti);
-        let mut cache = self
-            .revocation_cache
-            .write()
-            .map_err(|_| AuthError::Unavailable)?;
-        *cache = RevocationCache {
-            loaded_at: now,
-            tokens,
-        };
-        Ok(revoked)
-    }
-}
-
-fn bearer_token_from_headers(headers: &HeaderMap) -> Result<&str, AuthError> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next().ok_or(AuthError::Unauthorized)?;
-    if values.next().is_some() {
-        return Err(AuthError::Unauthorized);
-    }
-
-    let value = value.to_str().map_err(|_| AuthError::Unauthorized)?;
-    if value.len() > MAX_AUTHORIZATION_VALUE_BYTES {
-        return Err(AuthError::Unauthorized);
-    }
-
-    let (scheme, token) = value.split_once(' ').ok_or(AuthError::Unauthorized)?;
-    if !scheme.eq_ignore_ascii_case("Bearer")
-        || token.is_empty()
-        || token.bytes().any(|b| b.is_ascii_whitespace())
-    {
-        return Err(AuthError::Unauthorized);
-    }
-    Ok(token)
-}
-
-fn decode_json_segment(segment: &str, max_decoded_bytes: usize) -> Result<Value, AuthError> {
-    let decoded = URL_SAFE_NO_PAD
-        .decode(segment.as_bytes())
-        .map_err(|_| AuthError::Unauthorized)?;
-    if decoded.len() > max_decoded_bytes {
-        return Err(AuthError::Unauthorized);
-    }
-    serde_json::from_slice(&decoded).map_err(|_| AuthError::Unauthorized)
-}
-
-fn validate_jwt_header(header: &Value) -> Result<(), AuthError> {
-    let header = header.as_object().ok_or(AuthError::Unauthorized)?;
-    for key in header.keys() {
-        if key != "alg" && key != "typ" {
-            return Err(AuthError::Unauthorized);
-        }
-    }
-    if header.get("alg").and_then(Value::as_str) != Some("ES256") {
-        return Err(AuthError::Unauthorized);
-    }
-    if let Some(typ) = header.get("typ") {
-        if typ.as_str() != Some("JWT") {
-            return Err(AuthError::Unauthorized);
-        }
-    }
-    Ok(())
-}
-
-fn validate_temporal_claims(payload: &Value) -> Result<(), AuthError> {
-    let payload = payload.as_object().ok_or(AuthError::Unauthorized)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| AuthError::Unavailable)?
-        .as_secs();
-
-    if let Some(exp) = payload.get("exp") {
-        let exp = numeric_date(exp).ok_or(AuthError::Unauthorized)?;
-        if exp <= now {
-            return Err(AuthError::Unauthorized);
-        }
-    }
-    if let Some(nbf) = payload.get("nbf") {
-        let nbf = numeric_date(nbf).ok_or(AuthError::Unauthorized)?;
-        if nbf > now {
-            return Err(AuthError::Unauthorized);
-        }
-    }
-    if let Some(iat) = payload.get("iat") {
-        numeric_date(iat).ok_or(AuthError::Unauthorized)?;
-    }
-
-    Ok(())
-}
-
-fn numeric_date(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|v| u64::try_from(v).ok()))
-}
-
-fn required_string_claim(
-    payload: &Value,
-    name: &str,
-    max_bytes: usize,
-) -> Result<String, AuthError> {
-    let claim = payload
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or(AuthError::Unauthorized)?;
-    if claim.is_empty() || claim.len() > max_bytes {
-        return Err(AuthError::Unauthorized);
-    }
-    Ok(claim.to_string())
-}
-
-fn load_revoked_tokens(
-    path: &Path,
-) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut file = fs::File::open(path)?;
-    let mut text = String::new();
-    let bytes_read = Read::by_ref(&mut file)
-        .take((MAX_REVOCATION_FILE_BYTES + 1) as u64)
-        .read_to_string(&mut text)?;
-    if bytes_read > MAX_REVOCATION_FILE_BYTES {
-        return Err("revoked token list is too large".into());
-    }
-
-    let mut revoked = HashSet::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.len() > MAX_JWT_JTI_BYTES {
-            return Err("revoked token jti is too long".into());
-        }
-        revoked.insert(line.to_string());
-    }
-    Ok(revoked)
-}
-
-fn load_es256_public_key(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let pem = fs::read(path)?;
-    for pem in Pem::iter_from_buffer(&pem) {
-        let pem = pem.map_err(|e| format!("invalid public key PEM: {e:?}"))?;
-        if pem.label != "PUBLIC KEY" {
-            continue;
-        }
-
-        let (remaining_der, spki) = SubjectPublicKeyInfo::from_der(&pem.contents)
-            .map_err(|_| "invalid SubjectPublicKeyInfo DER")?;
-        if !remaining_der.is_empty() {
-            return Err("trailing data after SubjectPublicKeyInfo".into());
-        }
-        let key = spki.parsed().map_err(|_| "invalid public key")?;
-        let PublicKey::EC(point) = key else {
-            return Err("JWT public key must be an EC P-256 key".into());
-        };
-        let point_data = point.data();
-        if point.key_size() != 256 || point_data.len() != 65 || point_data[0] != 4 {
-            return Err("JWT public key must be an uncompressed P-256 point".into());
-        }
-        return Ok(point_data.to_vec());
-    }
-
-    Err("public key PEM does not contain a PUBLIC KEY block".into())
+fn client_identity_from_peer_certs(
+    peer_certs: Option<&[CertificateDer<'_>]>,
+) -> Result<String, &'static str> {
+    let certs = peer_certs.ok_or("mTLS peer certificate chain missing")?;
+    let leaf = certs.first().ok_or("mTLS peer certificate chain empty")?;
+    spki_sha256_hex_from_cert_der(leaf.as_ref()).map_err(|_| "invalid mTLS client certificate")
 }
 
 // ============================================================================
@@ -1043,15 +747,13 @@ async fn connect_upstream_uds(upstream: &UpstreamTarget) -> io::Result<UnixStrea
 struct AppState {
     upstream: UpstreamTarget,
     max_body_size: usize,
-    auth_verifier: AuthVerifier,
 }
 
 impl AppState {
-    fn new(upstream: UpstreamTarget, max_body_size: usize, auth_verifier: AuthVerifier) -> Self {
+    fn new(upstream: UpstreamTarget, max_body_size: usize) -> Self {
         Self {
             upstream,
             max_body_size,
-            auth_verifier,
         }
     }
 }
@@ -1065,15 +767,21 @@ impl AppState {
 async fn proxy_handler<B>(
     state: AppState,
     client_addr: SocketAddr,
+    client_identity: String,
     req: Request<B>,
 ) -> Response<ProxyBody>
 where
     B: HttpBody<Data = Bytes> + Send + 'static,
     B::Error: Into<BoxError>,
 {
-    let result = AssertUnwindSafe(proxy_handler_inner(state, client_addr, req))
-        .catch_unwind()
-        .await;
+    let result = AssertUnwindSafe(proxy_handler_inner(
+        state,
+        client_addr,
+        client_identity,
+        req,
+    ))
+    .catch_unwind()
+    .await;
 
     match result {
         Ok(response) => response,
@@ -1092,24 +800,21 @@ where
 async fn proxy_handler_inner<B>(
     state: AppState,
     client_addr: SocketAddr,
+    client_identity: String,
     req: Request<B>,
 ) -> Response<ProxyBody>
 where
     B: HttpBody<Data = Bytes> + Send + 'static,
     B::Error: Into<BoxError>,
 {
-    let path = req.uri().path().to_string();
-    if let Err(err) = state.auth_verifier.verify_headers(req.headers()) {
-        debug!(
-            client = %client_addr,
-            path = %path,
-            error = ?err,
-            "Rejected request before proxying"
+    if req.headers().contains_key(header::AUTHORIZATION) {
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "Authorization header is not accepted",
         );
-        return auth_error_response(err);
     }
 
-    if path == "/health" {
+    if req.uri().path() == "/health" {
         return local_health_response(req.method());
     }
 
@@ -1117,7 +822,7 @@ where
         return text_response(StatusCode::NOT_FOUND, "Not Found");
     }
 
-    http_proxy(state, req, client_addr).await
+    http_proxy(state, req, client_addr, &client_identity).await
 }
 
 fn is_http_upgrade(headers: &HeaderMap) -> bool {
@@ -1137,6 +842,7 @@ async fn http_proxy<B>(
     state: AppState,
     req: Request<B>,
     client_addr: SocketAddr,
+    client_identity: &str,
 ) -> Response<ProxyBody>
 where
     B: HttpBody<Data = Bytes> + Send + 'static,
@@ -1166,7 +872,9 @@ where
     let mut upstream_headers = HeaderMap::new();
     let request_connection_tokens = connection_header_tokens(req.headers());
     for (key, value) in req.headers() {
-        if !is_hop_by_hop_header(key, &request_connection_tokens) {
+        if !is_hop_by_hop_header(key, &request_connection_tokens)
+            && key.as_str() != CLIENT_IDENTITY_HEADER
+        {
             upstream_headers.append(key.clone(), value.clone());
         }
     }
@@ -1181,6 +889,15 @@ where
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static("https"),
     );
+    if let Ok(identity_val) = HeaderValue::from_str(client_identity) {
+        upstream_headers.insert(
+            HeaderName::from_static(CLIENT_IDENTITY_HEADER),
+            identity_val,
+        );
+    } else {
+        error!(client = %client_addr, "Invalid mTLS client identity");
+        return text_response(StatusCode::BAD_GATEWAY, "Bad Gateway");
+    }
 
     // Stream request body to upstream without buffering (avoids holding up to 500 MB in memory).
     let limited_body = Limited::new(req.into_body(), state.max_body_size);
@@ -1405,10 +1122,19 @@ async fn serve_public_connection(
                 return;
             }
         };
+    let client_identity =
+        match client_identity_from_peer_certs(tls_stream.get_ref().1.peer_certificates()) {
+            Ok(identity) => identity,
+            Err(err) => {
+                debug!(client = %client_addr, error = %err, "mTLS client identity unavailable");
+                return;
+            }
+        };
 
     let service = service_fn(move |req: Request<Incoming>| {
         let state = state.clone();
-        async move { Ok::<_, Infallible>(proxy_handler(state, client_addr, req).await) }
+        let client_identity = client_identity.clone();
+        async move { Ok::<_, Infallible>(proxy_handler(state, client_addr, client_identity, req).await) }
     });
 
     let mut builder = http1::Builder::new();
@@ -1523,15 +1249,9 @@ async fn main() {
         tls_config.clone(),
     ));
 
-    let auth_verifier = AuthVerifier::new(
-        PathBuf::from(&args.jwt_public_key_file),
-        PathBuf::from(&args.revoked_tokens_file),
-    )
-    .unwrap_or_else(|e| panic!("Failed to initialize JWT verifier: {e}"));
-
     let upstream = UpstreamTarget::from_args(&args);
 
-    let state = AppState::new(upstream.clone(), args.max_body_size, auth_verifier);
+    let state = AppState::new(upstream.clone(), args.max_body_size);
 
     let listen_addr: SocketAddr = format!("{}:{}", args.listen_host, args.listen_port)
         .parse()
@@ -1561,36 +1281,23 @@ async fn main() {
 mod tests {
     use super::*;
     use http_body::Frame;
-    use http_body_util::{Empty, Full};
+    use http_body_util::Empty;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::pin::Pin;
     use std::process;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    const TEST_PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE6Qzrhx04jK357AQGxktuXWYDXuFc\n\
-0XHE9I3d0nYGXC605q/IJjBb6naEi5dTT+CxyA2Deba+TLWggp0R/cq/DA==\n\
------END PUBLIC KEY-----\n";
-
-    const TEST_TOKEN: &str = "\
-eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.\
-eyJzdWIiOiJwcm94eS10ZXN0LXVzZXIiLCJqdGkiOiJwcm94eS10ZXN0LWp0aSJ9.\
-XJuGmMHelpKPeEZCG-COaRzek0HSlriS5Yq_doPG497iGZCJEkm38a9QHE1iwZuVXDTs-_7Cjnfu2MfyRzwuow";
-
-    const TEST_REVOKED_TOKEN: &str = "\
-eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.\
-eyJzdWIiOiJwcm94eS10ZXN0LXVzZXIiLCJqdGkiOiJyZXZva2VkLWp0aSJ9.\
-gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W670mWj9g";
+    const TEST_CLIENT_IDENTITY: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     struct TestFiles {
         dir: PathBuf,
-        public_key: PathBuf,
-        revoked_tokens: PathBuf,
     }
 
     impl TestFiles {
-        fn new(revoked: &str) -> Self {
+        fn new() -> Self {
             let unique = format!(
                 "vvv-proxy-test-{}-{}",
                 process::id(),
@@ -1603,20 +1310,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             fs::create_dir(&dir).expect("create test temp dir");
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
                 .expect("set test temp dir permissions");
-            let public_key = dir.join("public.pem");
-            let revoked_tokens = dir.join("revoked.txt");
-            fs::write(&public_key, TEST_PUBLIC_PEM).expect("write public key");
-            fs::write(&revoked_tokens, revoked).expect("write revoked token file");
-            Self {
-                dir,
-                public_key,
-                revoked_tokens,
-            }
-        }
-
-        fn verifier(&self) -> AuthVerifier {
-            AuthVerifier::new(self.public_key.clone(), self.revoked_tokens.clone())
-                .expect("auth verifier")
+            Self { dir }
         }
 
         fn state(&self) -> AppState {
@@ -1628,7 +1322,6 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
                     expected_peer_gid: self.gid(),
                 },
                 1024,
-                self.verifier(),
             )
         }
 
@@ -1672,10 +1365,6 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
 
     fn empty_request_body() -> Empty<Bytes> {
         Empty::new()
-    }
-
-    fn request_body(body: &'static [u8]) -> Full<Bytes> {
-        Full::new(Bytes::from_static(body))
     }
 
     async fn response_body_bytes(response: Response<ProxyBody>, limit: usize) -> Bytes {
@@ -1849,126 +1538,19 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             .expect("connection accepted after permit release");
     }
 
-    #[test]
-    fn proxy_auth_accepts_valid_es256_token() {
-        let files = TestFiles::new("");
-        assert_eq!(
-            files
-                .verifier()
-                .verify_token(TEST_TOKEN)
-                .expect("valid token"),
-            "proxy-test-user"
-        );
-    }
-
-    #[test]
-    fn proxy_auth_rejects_revoked_token() {
-        let files = TestFiles::new("revoked-jti\n");
-        assert!(matches!(
-            files.verifier().verify_token(TEST_REVOKED_TOKEN),
-            Err(AuthError::Unauthorized)
-        ));
-    }
-
-    #[test]
-    fn proxy_auth_rejects_oversized_revocation_file() {
-        let revoked = "x".repeat(MAX_REVOCATION_FILE_BYTES + 1);
-        let files = TestFiles::new(&revoked);
-        assert!(AuthVerifier::new(files.public_key.clone(), files.revoked_tokens.clone()).is_err());
-    }
-
-    #[test]
-    fn proxy_auth_rejects_overlong_revocation_entry() {
-        let revoked = format!("{}\n", "j".repeat(MAX_JWT_JTI_BYTES + 1));
-        let files = TestFiles::new(&revoked);
-        assert!(AuthVerifier::new(files.public_key.clone(), files.revoked_tokens.clone()).is_err());
-    }
-
-    #[test]
-    fn proxy_auth_sheds_when_verifier_concurrency_is_exhausted() {
-        let files = TestFiles::new("");
-        let verifier = files.verifier();
-        let _permits: Vec<_> = (0..MAX_CONCURRENT_AUTH_VERIFICATIONS)
-            .map(|_| {
-                verifier
-                    .verification_permits
-                    .try_acquire()
-                    .expect("permit available")
-            })
-            .collect();
-
-        assert!(matches!(
-            verifier.verify_token(TEST_TOKEN),
-            Err(AuthError::Busy)
-        ));
-    }
-
-    #[test]
-    fn proxy_auth_rejects_missing_invalid_and_duplicate_headers() {
-        let files = TestFiles::new("");
-        let verifier = files.verifier();
-
-        let headers = HeaderMap::new();
-        assert!(matches!(
-            verifier.verify_headers(&headers),
-            Err(AuthError::Unauthorized)
-        ));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer not-a-jwt"),
-        );
-        assert!(matches!(
-            verifier.verify_headers(&headers),
-            Err(AuthError::Unauthorized)
-        ));
-
-        let mut headers = HeaderMap::new();
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {TEST_TOKEN}")).expect("header value"),
-        );
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer not-a-jwt"),
-        );
-        assert!(matches!(
-            verifier.verify_headers(&headers),
-            Err(AuthError::Unauthorized)
-        ));
-    }
-
     #[tokio::test]
-    async fn proxy_health_requires_auth_and_stays_local() {
-        let files = TestFiles::new("");
-        let unauth_body_polls = Arc::new(AtomicUsize::new(0));
-        let unauth_req = Request::builder()
-            .method(Method::GET)
-            .uri("/health")
-            .body(body_that_counts_polls(unauth_body_polls.clone()))
-            .expect("request");
-
-        let unauth_response = proxy_handler_inner(
-            files.state(),
-            SocketAddr::from(([127, 0, 0, 1], 12345)),
-            unauth_req,
-        )
-        .await;
-
-        assert_eq!(unauth_response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(unauth_body_polls.load(Ordering::SeqCst), 0);
-
+    async fn proxy_health_stays_local_after_mtls() {
+        let files = TestFiles::new();
         let req = Request::builder()
             .method(Method::GET)
             .uri("/health")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .body(empty_request_body())
             .expect("request");
 
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
@@ -1979,58 +1561,46 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_rejects_unauthorized_request_before_upstream() {
-        let files = TestFiles::new("");
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/v1/transcribe")
-            .body(request_body(b"body must not be proxied"))
-            .expect("request");
-
-        let response = proxy_handler_inner(
-            files.state(),
-            SocketAddr::from(([127, 0, 0, 1], 12345)),
-            req,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn proxy_rejects_unauthorized_request_without_polling_body() {
-        let files = TestFiles::new("");
+    async fn proxy_rejects_authorization_header_without_polling_body() {
+        let files = TestFiles::new();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/transcribe")
-            .header(header::AUTHORIZATION, "Bearer not-a-valid-jwt")
+            .header(header::AUTHORIZATION, "obsolete")
             .body(body_that_counts_polls(body_polls.clone()))
             .expect("request");
 
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn proxy_does_not_send_continue_for_unauthorized_expect_request() {
+    async fn proxy_does_not_send_continue_for_authorization_expect_request() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let files = TestFiles::new("");
+        let files = TestFiles::new();
         let state = files.state();
         let (mut client_io, server_io) = tokio::io::duplex(4096);
         let service = service_fn(move |req: Request<Incoming>| {
             let state = state.clone();
             async move {
                 Ok::<_, Infallible>(
-                    proxy_handler(state, SocketAddr::from(([127, 0, 0, 1], 12345)), req).await,
+                    proxy_handler(
+                        state,
+                        SocketAddr::from(([127, 0, 0, 1], 12345)),
+                        TEST_CLIENT_IDENTITY.to_string(),
+                        req,
+                    )
+                    .await,
                 )
             }
         });
@@ -2052,7 +1622,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             .write_all(
                 b"POST /v1/transcribe HTTP/1.1\r\n\
                   Host: example.test\r\n\
-                  Authorization: Bearer not-a-valid-jwt\r\n\
+                  Authorization: obsolete\r\n\
                   Expect: 100-continue\r\n\
                   Content-Length: 4\r\n\r\n",
             )
@@ -2065,7 +1635,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             .expect("server response timeout")
             .expect("read response");
         let response = String::from_utf8_lossy(&response);
-        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(!response.contains("100 Continue"));
 
         server
@@ -2075,32 +1645,11 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_auth_runs_before_oversized_body_check() {
-        let files = TestFiles::new("");
+    async fn proxy_rejects_oversized_content_length() {
+        let files = TestFiles::new();
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/transcribe")
-            .header(header::CONTENT_LENGTH, "999999")
-            .body(empty_request_body())
-            .expect("request");
-
-        let response = proxy_handler_inner(
-            files.state(),
-            SocketAddr::from(([127, 0, 0, 1], 12345)),
-            req,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn proxy_rejects_authenticated_oversized_content_length() {
-        let files = TestFiles::new("");
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/v1/transcribe")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .header(header::CONTENT_LENGTH, "1025")
             .body(empty_request_body())
             .expect("request");
@@ -2108,6 +1657,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
@@ -2116,13 +1666,12 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_rejects_authenticated_http_upgrade_without_upstream() {
-        let files = TestFiles::new("");
+    async fn proxy_rejects_http_upgrade_without_upstream() {
+        let files = TestFiles::new();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/transcribe")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .header(header::UPGRADE, "h2c")
             .body(body_that_counts_polls(body_polls.clone()))
             .expect("request");
@@ -2130,6 +1679,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
@@ -2139,38 +1689,19 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_requires_auth_before_public_route_allowlist() {
-        let files = TestFiles::new("");
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("/not-a-public-route")
-            .body(empty_request_body())
-            .expect("request");
-
-        let response = proxy_handler_inner(
-            files.state(),
-            SocketAddr::from(([127, 0, 0, 1], 12345)),
-            req,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn proxy_rejects_authenticated_unknown_route_without_upstream() {
-        let files = TestFiles::new("");
+    async fn proxy_rejects_unknown_route_without_upstream() {
+        let files = TestFiles::new();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/not-real")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .body(body_that_counts_polls(body_polls.clone()))
             .expect("request");
 
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
@@ -2180,18 +1711,18 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_rejects_authenticated_wrong_method_without_upstream() {
-        let files = TestFiles::new("");
+    async fn proxy_rejects_wrong_method_without_upstream() {
+        let files = TestFiles::new();
         let req = Request::builder()
             .method(Method::GET)
             .uri("/v1/transcribe")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
             .body(empty_request_body())
             .expect("request");
 
         let response = proxy_handler_inner(
             files.state(),
             SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
             req,
         )
         .await;
@@ -2200,11 +1731,11 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[tokio::test]
-    async fn proxy_forwards_authenticated_http_over_unix_socket() {
+    async fn proxy_forwards_mtls_identity_http_over_unix_socket() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixListener;
 
-        let files = TestFiles::new("");
+        let files = TestFiles::new();
         let socket_path = files.dir.join("upstream.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind test UDS");
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
@@ -2217,8 +1748,15 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             assert!(request.starts_with("GET /v1/queue/status HTTP/1.1"));
             let request_lower = request.to_ascii_lowercase();
             assert!(!request_lower.contains("connection:"));
+            assert!(!request_lower.contains("authorization:"));
             assert!(!request_lower.contains("x-strip-request:"));
+            assert!(!request_lower
+                .contains("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
             assert!(request_lower.contains("x-keep-request: visible"));
+            assert!(request_lower.contains(&format!(
+                "{}: {}",
+                CLIENT_IDENTITY_HEADER, TEST_CLIENT_IDENTITY
+            )));
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\n\
@@ -2240,20 +1778,27 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
                 expected_peer_gid: files.gid(),
             },
             1024,
-            files.verifier(),
         );
         let req = Request::builder()
             .method(Method::GET)
             .uri("/v1/queue/status")
-            .header(header::AUTHORIZATION, format!("Bearer {TEST_TOKEN}"))
+            .header(
+                CLIENT_IDENTITY_HEADER,
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )
             .header(header::CONNECTION, "keep-alive, x-strip-request")
             .header("x-strip-request", "secret")
             .header("x-keep-request", "visible")
             .body(empty_request_body())
             .expect("request");
 
-        let response =
-            proxy_handler_inner(state, SocketAddr::from(([127, 0, 0, 1], 12345)), req).await;
+        let response = proxy_handler_inner(
+            state,
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
+            req,
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().get("x-strip-response").is_none());
         assert!(response.headers().get(header::CONNECTION).is_none());
@@ -2272,7 +1817,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
         use std::os::unix::fs::symlink;
         use std::os::unix::net::UnixListener;
 
-        let files = TestFiles::new("");
+        let files = TestFiles::new();
         let real_socket_path = files.dir.join("real.sock");
         let listener = UnixListener::bind(&real_socket_path).expect("bind real UDS");
         fs::set_permissions(&real_socket_path, fs::Permissions::from_mode(0o600))
@@ -2293,7 +1838,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
 
     #[tokio::test]
     async fn proxy_rejects_wrong_upstream_peer_credentials_before_http() {
-        let files = TestFiles::new("");
+        let files = TestFiles::new();
         let (client, _server) = UnixStream::pair().expect("UDS pair");
         let unexpected_uid = files.uid().checked_add(1).unwrap_or(0);
         let upstream = UpstreamTarget {

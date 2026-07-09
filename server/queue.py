@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TranscriptionJob:
     job_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    token_fingerprint: str = ""
+    client_identity: str = ""
     audio_path: str | None = None
     audio_mime: str = "application/octet-stream"
     hotwords: str | None = None
@@ -119,7 +119,7 @@ class TranscriptionQueue:
     def get_job(self, job_id: str) -> TranscriptionJob | None:
         return self._jobs.get(job_id)
 
-    def get_queue_info(self, token_fingerprint: str) -> QueueStatusResponse:
+    def get_queue_info(self, client_identity: str) -> QueueStatusResponse:
         queued_ids = list(self._jobs.keys())
         your_jobs: list[JobInfo] = []
         total_queued = 0
@@ -129,7 +129,7 @@ class TranscriptionQueue:
             if job.status == JobStatus.QUEUED:
                 total_queued += 1
 
-            if job.token_fingerprint == token_fingerprint:
+            if job.client_identity == client_identity:
                 position = self._get_position(job_id)
                 eta = self._estimate_wait(position) if position is not None else None
                 your_jobs.append(

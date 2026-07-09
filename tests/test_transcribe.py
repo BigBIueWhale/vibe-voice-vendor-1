@@ -1,16 +1,12 @@
 import asyncio
 import struct
-import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
-import jwt as pyjwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from httpx import ASGITransport
@@ -19,24 +15,13 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.types import Message, Receive, Scope, Send
 
-import server.auth
 import server.routes.transcribe as transcribe_route
 from server.app import RequireHTTPSMiddleware, create_app
-from server.auth import _load_public_key
 from server.config import Settings
 from server.queue import TranscriptionJob, TranscriptionQueue
 
-_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
-_PUBLIC_PEM = _PRIVATE_KEY.public_key().public_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo,
-)
-
-TEST_TOKEN = pyjwt.encode(
-    {"sub": "test-user", "jti": uuid.uuid4().hex},
-    _PRIVATE_KEY,
-    algorithm="ES256",
-)
+TEST_CLIENT_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+CLIENT_IDENTITY_HEADERS = {"x-vvv-client-spki-sha256": TEST_CLIENT_IDENTITY}
 
 
 def _iter_original_routes(routes: Iterable[Any]) -> Iterator[Any]:
@@ -77,19 +62,12 @@ def _make_wav(sample_rate: int, num_samples: int) -> bytes:
 
 def _make_all_settings(tmp_path: Path, **overrides: object) -> Settings:
     """Create Settings with all required fields explicitly specified."""
-    _load_public_key.cache_clear()
-    server.auth._revocation_cache = (0.0, frozenset())
-    key_file = tmp_path / "public.pem"
-    key_file.write_bytes(_PUBLIC_PEM)
-    revoked_file = tmp_path / "revoked.txt"
-    revoked_file.write_text("")
+    _ = tmp_path
     values: dict[str, object] = {
         "asr_backend": "vibevoice",
         "vllm_base_url": "http://127.0.0.1:37845",
         "max_audio_bytes": 500 * 1024 * 1024,
         "max_queue_size": 5,
-        "jwt_public_key_file": str(key_file),
-        "revoked_tokens_file": str(revoked_file),
         "require_https": False,
         "vllm_model_name": "vibevoice",
         "vllm_temperature": 0.0,
@@ -165,11 +143,10 @@ def test_transcribe_route_has_no_fastapi_body_field(settings: Settings) -> None:
     assert route.dependant.body_params == []
 
 
-async def test_transcribe_requires_auth(settings: Settings) -> None:
+async def test_transcribe_requires_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.post("/v1/transcribe")
-        # HTTPBearer returns 403 when no Authorization header at all
-        assert resp.status_code in (401, 403)
+        assert resp.status_code == 403
 
 
 def test_hotwords_reject_reserved_control_tokens() -> None:
@@ -187,7 +164,7 @@ def test_hotwords_accept_ordinary_text() -> None:
     )
 
 
-async def test_transcribe_invalid_token_does_not_parse_multipart(
+async def test_transcribe_missing_client_identity_does_not_parse_multipart(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,11 +180,10 @@ async def test_transcribe_invalid_token_does_not_parse_multipart(
     async with _lifespan_client(settings) as client:
         resp = await client.post(
             "/v1/transcribe",
-            headers={"Authorization": "Bearer not-a-valid-jwt"},
             files={"audio": ("test.wav", b"not audio", "audio/wav")},
         )
 
-    assert resp.status_code == 401
+    assert resp.status_code == 403
     assert not parser_called
 
 
@@ -229,7 +205,7 @@ async def test_transcribe_body_limit_runs_before_spool_upload(
     async with _lifespan_client(s) as client:
         resp = await client.post(
             "/v1/transcribe",
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+            headers=CLIENT_IDENTITY_HEADERS,
             files={"audio": ("test.wav", oversized, "audio/wav")},
         )
 
@@ -253,14 +229,14 @@ async def test_transcribe_queue_full_does_not_parse_multipart(
     app = create_app(settings=s)
     app.state.http_client = httpx.AsyncClient()
     app.state.queue = TranscriptionQueue(max_size=s.max_queue_size)
-    app.state.queue.reserve(TranscriptionJob(token_fingerprint="already-uploading"))
+    app.state.queue.reserve(TranscriptionJob(client_identity="already-uploading"))
     transport = ASGITransport(app=app, raise_app_exceptions=False)
 
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/v1/transcribe",
-                headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+                headers=CLIENT_IDENTITY_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
     finally:
@@ -290,7 +266,7 @@ async def test_transcribe_parse_failure_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+                headers=CLIENT_IDENTITY_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 400
@@ -317,7 +293,7 @@ async def test_transcribe_parser_storage_error_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+                headers=CLIENT_IDENTITY_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 507
@@ -344,7 +320,7 @@ async def test_transcribe_spool_storage_error_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+                headers=CLIENT_IDENTITY_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 507
@@ -372,7 +348,7 @@ async def test_transcribe_malformed_multipart_parser_error_is_400(
             resp = await client.post(
                 "/v1/transcribe",
                 headers={
-                    "Authorization": f"Bearer {TEST_TOKEN}",
+                    **CLIENT_IDENTITY_HEADERS,
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                 },
                 content=body,
@@ -409,17 +385,17 @@ async def test_limited_request_stream_times_out_stalled_body(
     assert request.closed
 
 
-async def test_queue_status_requires_auth(settings: Settings) -> None:
+async def test_queue_status_requires_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.get("/v1/queue/status")
-        assert resp.status_code in (401, 403)
+        assert resp.status_code == 403
 
 
-async def test_queue_status_with_auth(settings: Settings) -> None:
+async def test_queue_status_with_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.get(
             "/v1/queue/status",
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+            headers=CLIENT_IDENTITY_HEADERS,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -431,7 +407,7 @@ async def test_transcribe_empty_audio(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.post(
             "/v1/transcribe",
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+            headers=CLIENT_IDENTITY_HEADERS,
             files={"audio": ("test.wav", b"", "audio/wav")},
         )
         assert resp.status_code == 400
@@ -443,7 +419,7 @@ async def test_https_required_rejects_http(tmp_path: Path) -> None:
         # No X-Forwarded-Proto header -> should be rejected
         resp = await client.get(
             "/v1/queue/status",
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
+            headers=CLIENT_IDENTITY_HEADERS,
         )
         assert resp.status_code == 403
         assert "HTTPS" in resp.json()["detail"]
@@ -491,7 +467,7 @@ async def test_https_required_passes_with_header(tmp_path: Path) -> None:
         resp = await client.get(
             "/v1/queue/status",
             headers={
-                "Authorization": f"Bearer {TEST_TOKEN}",
+                **CLIENT_IDENTITY_HEADERS,
                 "X-Forwarded-Proto": "https",
             },
         )

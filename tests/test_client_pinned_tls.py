@@ -81,7 +81,6 @@ def test_client_requires_server_pin_and_client_certificate(tmp_path: Path) -> No
     tls = _make_client_tls_files(tmp_path)
     client = VibevoiceClient(
         base_url="https://example.test:42862",
-        token="tok",
         server_pin=GOOD_PIN,
         cert=(tls["client_cert_path"], tls["client_key_path"]),
     )
@@ -107,8 +106,6 @@ def test_cli_rejects_ca_cert_argument(tmp_path: Path) -> None:
                 "vvv",
                 "--server",
                 "https://example.test:42862",
-                "--token",
-                "t",
                 "--server-pin",
                 GOOD_PIN,
                 "--ca-cert",
@@ -150,8 +147,6 @@ def test_cli_passes_pin_and_mtls_paths_to_client(tmp_path: Path) -> None:
                 "vvv",
                 "--server",
                 "https://example.test:42862",
-                "--token",
-                "t",
                 "--server-pin",
                 GOOD_PIN,
                 "--client-cert",
@@ -170,7 +165,6 @@ def test_cli_passes_pin_and_mtls_paths_to_client(tmp_path: Path) -> None:
     assert exc_info.value.code == 0
     assert captured == {
         "base_url": "https://example.test:42862",
-        "token": "t",
         "server_pin": GOOD_PIN,
         "cert": (str(client_cert), str(client_key)),
     }

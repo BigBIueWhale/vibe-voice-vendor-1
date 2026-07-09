@@ -13,7 +13,7 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from server.audio import detect_mime_type, probe_duration_file
-from server.auth import verify_token
+from server.client_identity import require_client_identity
 from server.models import ErrorEvent, JobStatus, QueuePositionEvent, TranscriptionChunkEvent
 from server.queue import TranscriptionJob, TranscriptionQueue
 
@@ -126,12 +126,13 @@ def _get_hotwords(form: FormData) -> str | None:
 @router.post("/v1/transcribe")
 async def transcribe(
     request: Request,
-    token_fingerprint: Annotated[str, Depends(verify_token)],
+    client_identity: Annotated[str, Depends(require_client_identity)],
 ) -> StreamingResponse:
-    # Keep auth ahead of multipart parsing. FastAPI parses body parameters before
-    # dependencies, so this route parses the form manually only after verify_token.
+    # Keep client identity ahead of multipart parsing. FastAPI parses body
+    # parameters before dependencies, so this route parses the form manually only
+    # after the proxy-provided mTLS client identity is present.
     queue: TranscriptionQueue = request.app.state.queue
-    job = TranscriptionJob(token_fingerprint=token_fingerprint)
+    job = TranscriptionJob(client_identity=client_identity)
     try:
         queue.reserve(job)
     except asyncio.QueueFull:
