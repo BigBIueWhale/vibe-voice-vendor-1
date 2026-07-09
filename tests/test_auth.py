@@ -30,8 +30,6 @@ def _make_settings(tmp_path: object, public_pem: bytes, revoked_tokens_file: str
     return Settings(
         asr_backend="vibevoice",
         vllm_base_url="http://127.0.0.1:9999",
-        server_host="127.0.0.1",
-        server_port=54912,
         max_audio_bytes=500 * 1024 * 1024,
         max_queue_size=5,
         jwt_public_key_file=str(key_file),
@@ -75,14 +73,57 @@ def test_invalid_token(tmp_path: object) -> None:
     assert exc_info.value.status_code == 401
 
 
+def test_oversized_token_rejected_before_jwt_decode(
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset_caches()
+    revoked_file = Path(str(tmp_path)) / "revoked.txt"
+    revoked_file.write_text("")
+    settings = _make_settings(tmp_path, _PUBLIC_PEM, str(revoked_file))
+
+    def fail_decode(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("jwt.decode should not be called for oversized tokens")
+
+    monkeypatch.setattr("server.auth.jwt.decode", fail_decode)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="x" * (8 * 1024 + 1))
+
+    with pytest.raises(HTTPException) as exc_info:
+        verify_token(creds, settings)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sub": "", "jti": "jti"},
+        {"sub": "alice", "jti": ""},
+        {"sub": "a" * 257, "jti": "jti"},
+        {"sub": "alice", "jti": "j" * 129},
+    ],
+)
+def test_signed_token_with_invalid_bounded_claims_rejected(
+    tmp_path: object,
+    payload: dict[str, str],
+) -> None:
+    _reset_caches()
+    revoked_file = Path(str(tmp_path)) / "revoked.txt"
+    revoked_file.write_text("")
+    settings = _make_settings(tmp_path, _PUBLIC_PEM, str(revoked_file))
+    token = pyjwt.encode(payload, _PRIVATE_KEY, algorithm="ES256")
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    with pytest.raises(HTTPException) as exc_info:
+        verify_token(creds, settings)
+    assert exc_info.value.status_code == 401
+
+
 def test_no_public_key_configured(tmp_path: object) -> None:
     revoked_file = Path(str(tmp_path)) / "revoked.txt"
     revoked_file.write_text("")
     settings = Settings(
         asr_backend="vibevoice",
         vllm_base_url="http://127.0.0.1:9999",
-        server_host="127.0.0.1",
-        server_port=54912,
         max_audio_bytes=500 * 1024 * 1024,
         max_queue_size=5,
         jwt_public_key_file="",
@@ -150,6 +191,31 @@ def test_revoked_token(tmp_path: object) -> None:
         verify_token(creds, settings)
     assert exc_info.value.status_code == 401
     assert "revoked" in exc_info.value.detail.lower()
+
+
+@pytest.mark.parametrize(
+    "revoked_file_bytes",
+    [
+        b"x" * (1024 * 1024 + 1),
+        ("j" * 129).encode(),
+        b"\xff",
+    ],
+)
+def test_bad_revocation_file_state_is_503(
+    tmp_path: object,
+    revoked_file_bytes: bytes,
+) -> None:
+    _reset_caches()
+    revoked_file = Path(str(tmp_path)) / "revoked.txt"
+    revoked_file.write_bytes(revoked_file_bytes)
+
+    settings = _make_settings(tmp_path, _PUBLIC_PEM, str(revoked_file))
+    token = _sign("alice", uuid.uuid4().hex, _PRIVATE_KEY)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    with pytest.raises(HTTPException) as exc_info:
+        verify_token(creds, settings)
+    assert exc_info.value.status_code == 503
 
 
 def test_non_revoked_token_passes(tmp_path: object) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -8,17 +9,23 @@ import httpx
 
 from client.models import EventType, TranscriptionEvent
 
+ClientCert = str | tuple[str, str] | tuple[str, str, str]
+VerifyConfig = bool | str | ssl.SSLContext
+
 
 class VibevoiceClient:
     def __init__(
         self,
         base_url: str,
         token: str,
-        verify: bool | str,
+        verify: VerifyConfig,
+        cert: ClientCert | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token = token
-        self._verify: bool | str = verify
+        self._verify: VerifyConfig = verify
+        self._cert = cert
+        self._ssl_context = _build_ssl_context(verify, cert)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
@@ -26,13 +33,16 @@ class VibevoiceClient:
     async def transcribe(
         self,
         audio_path: str | Path,
-        hotwords: str | None,
+        hotwords: str | None = None,
     ) -> AsyncIterator[TranscriptionEvent]:
         """Upload audio and stream transcription events."""
         path = Path(audio_path)
 
         timeout = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=timeout, verify=self._verify) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            verify=self._ssl_context,
+        ) as client:
             with open(path, "rb") as f:
                 files = {"audio": (path.name, f, "application/octet-stream")}
                 data = {}
@@ -92,10 +102,38 @@ class VibevoiceClient:
 
     async def queue_status(self) -> dict[str, object]:
         """Get queue status for your token."""
-        async with httpx.AsyncClient(timeout=10.0, verify=self._verify) as client:
+        async with httpx.AsyncClient(timeout=10.0, verify=self._ssl_context) as client:
             resp = await client.get(
                 f"{self._base_url}/v1/queue/status",
                 headers=self._headers(),
             )
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
+
+
+def _build_ssl_context(verify: VerifyConfig, cert: ClientCert | None) -> ssl.SSLContext:
+    if verify is False:
+        raise ValueError("TLS certificate verification cannot be disabled")
+
+    if isinstance(verify, ssl.SSLContext):
+        context = verify
+    elif verify is True:
+        context = ssl.create_default_context()
+    elif isinstance(verify, str):
+        trust_path = Path(verify)
+        if trust_path.is_dir():
+            context = ssl.create_default_context(capath=str(trust_path))
+        else:
+            context = ssl.create_default_context(cafile=str(trust_path))
+    else:
+        raise TypeError("verify must be True, a CA path, or an ssl.SSLContext")
+
+    if cert is not None:
+        if isinstance(cert, str):
+            context.load_cert_chain(cert)
+        elif len(cert) == 2:
+            context.load_cert_chain(cert[0], cert[1])
+        else:
+            context.load_cert_chain(cert[0], cert[1], cert[2])
+
+    return context

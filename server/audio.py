@@ -1,9 +1,14 @@
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import tempfile
 from pathlib import Path, PurePosixPath
+
+_FFPROBE_TIMEOUT_SECONDS = 120.0
+_FFMPEG_TIMEOUT_SECONDS = 900.0
+_FFMPEG_THREADS = "1"
 
 _MIME_MAP = {
     ".wav": "audio/wav",
@@ -17,6 +22,23 @@ _MIME_MAP = {
     ".wma": "audio/x-ms-wma",
     ".aac": "audio/aac",
 }
+
+
+async def _communicate_or_kill(
+    process: asyncio.subprocess.Process,
+    *,
+    timeout_seconds: float,
+    operation: str,
+) -> tuple[bytes, bytes]:
+    try:
+        return await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.communicate()
+        timeout_label = f"{timeout_seconds:.3g}"
+        raise RuntimeError(f"{operation} timed out after {timeout_label} seconds") from None
 
 
 def encode_audio_base64(raw_bytes: bytes) -> str:
@@ -61,6 +83,11 @@ async def compress_file_to_opus(path: str) -> bytes:
         process = await asyncio.create_subprocess_exec(
             "ffmpeg",
             "-y",
+            "-nostdin",
+            "-threads",
+            _FFMPEG_THREADS,
+            "-protocol_whitelist",
+            "file,pipe",
             "-i",
             path,
             "-vn",
@@ -76,7 +103,11 @@ async def compress_file_to_opus(path: str) -> bytes:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr_data = await process.communicate()
+        _, stderr_data = await _communicate_or_kill(
+            process,
+            timeout_seconds=_FFMPEG_TIMEOUT_SECONDS,
+            operation="ffmpeg opus compression",
+        )
         if process.returncode != 0:
             err = stderr_data.decode("utf-8", errors="replace")
             raise RuntimeError(f"ffmpeg opus compression failed: {err}")
@@ -105,6 +136,8 @@ async def probe_duration_file(path: str) -> float:
         "ffprobe",
         "-v",
         "quiet",
+        "-protocol_whitelist",
+        "file",
         "-print_format",
         "json",
         "-show_format",
@@ -112,7 +145,11 @@ async def probe_duration_file(path: str) -> float:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
+    stdout, stderr = await _communicate_or_kill(
+        process,
+        timeout_seconds=_FFPROBE_TIMEOUT_SECONDS,
+        operation="ffprobe",
+    )
 
     if process.returncode != 0:
         error_msg = stderr.decode("utf-8", errors="replace")

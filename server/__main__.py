@@ -1,9 +1,17 @@
 import argparse
+import contextlib
+import os
+import socket
+from pathlib import Path
 
 import uvicorn
 
 from server.app import create_app
 from server.config import Settings
+
+_UVICORN_BACKLOG = 64
+_UVICORN_LIMIT_CONCURRENCY = 128
+_UVICORN_HEADER_BYTES = 16 * 1024
 
 
 def _parse_bool(value: str) -> bool:
@@ -12,6 +20,26 @@ def _parse_bool(value: str) -> bool:
     if value.lower() in ("false", "0", "no"):
         return False
     raise argparse.ArgumentTypeError(f"Expected true/false, got: {value}")
+
+
+def _bind_private_uds(path: Path) -> socket.socket:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(str(path))
+        os.chmod(path, 0o600)
+        sock.listen(_UVICORN_BACKLOG)
+        sock.setblocking(False)
+    except Exception:
+        sock.close()
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+    return sock
 
 
 def main() -> None:
@@ -25,8 +53,11 @@ def main() -> None:
         default="vibevoice",
         help="ASR backend: local vLLM VibeVoice or Groq Whisper cloud API (default: vibevoice)",
     )
-    parser.add_argument("--host", required=True, help="Server bind address")
-    parser.add_argument("--port", type=int, required=True, help="Server bind port")
+    parser.add_argument(
+        "--uds",
+        required=True,
+        help="Private Unix domain socket path to bind",
+    )
     parser.add_argument(
         "--max-audio-bytes", type=int, required=True, help="Maximum audio upload size in bytes"
     )
@@ -67,8 +98,6 @@ def main() -> None:
 
     settings = Settings(
         asr_backend=args.asr_backend,
-        server_host=args.host,
-        server_port=args.port,
         max_audio_bytes=args.max_audio_bytes,
         max_queue_size=args.max_queue_size,
         jwt_public_key_file=args.jwt_public_key_file,
@@ -83,13 +112,28 @@ def main() -> None:
     )
 
     app = create_app(settings)
-    uvicorn.run(
-        app,
-        host=settings.server_host,
-        port=settings.server_port,
-        log_level="warning",
-        access_log=False,
-    )
+    uds_path = Path(args.uds)
+    sock = _bind_private_uds(uds_path)
+    try:
+        uvicorn.run(
+            app,
+            fd=sock.fileno(),
+            log_level="warning",
+            access_log=False,
+            http="h11",
+            ws="none",
+            proxy_headers=False,
+            server_header=False,
+            date_header=False,
+            backlog=_UVICORN_BACKLOG,
+            limit_concurrency=_UVICORN_LIMIT_CONCURRENCY,
+            timeout_keep_alive=1,
+            h11_max_incomplete_event_size=_UVICORN_HEADER_BYTES,
+        )
+    finally:
+        sock.close()
+        with contextlib.suppress(FileNotFoundError):
+            uds_path.unlink()
 
 
 if __name__ == "__main__":

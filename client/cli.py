@@ -66,10 +66,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="vvv", description="VibeVoice ASR client")
     parser.add_argument("--server", required=True, help="Server URL (e.g. https://asr.example.com)")
     parser.add_argument("--token", required=True, help="Bearer token for authentication")
-    parser.add_argument(
-        "--insecure", action="store_true", help="Disable TLS certificate verification"
-    )
     parser.add_argument("--ca-cert", help="Path to CA certificate for self-signed TLS")
+    parser.add_argument("--client-cert", required=True, help="Path to mTLS client certificate")
+    parser.add_argument("--client-key", required=True, help="Path to mTLS client private key")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -82,26 +81,23 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.insecure and args.ca_cert:
-        print("Error: --insecure and --ca-cert are mutually exclusive", file=sys.stderr)
-        sys.exit(1)
-
     if args.ca_cert and not Path(args.ca_cert).exists():
         print(f"CA cert file not found: {args.ca_cert}", file=sys.stderr)
         sys.exit(1)
+    if not Path(args.client_cert).exists():
+        print(f"Client cert file not found: {args.client_cert}", file=sys.stderr)
+        sys.exit(1)
+    if not Path(args.client_key).exists():
+        print(f"Client key file not found: {args.client_key}", file=sys.stderr)
+        sys.exit(1)
 
-    verify: bool | str
-    if args.insecure:
-        verify = False
-    elif args.ca_cert:
-        verify = args.ca_cert
-    else:
-        verify = True
+    verify: bool | str = args.ca_cert or True
 
     client = VibevoiceClient(
         base_url=args.server,
         token=args.token,
         verify=verify,
+        cert=(args.client_cert, args.client_key),
     )
 
     if args.command == "transcribe":

@@ -2,12 +2,15 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from server.audio import detect_mime_type, probe_duration_file
 from server.auth import verify_token
@@ -16,6 +19,12 @@ from server.queue import TranscriptionJob, TranscriptionQueue
 
 router = APIRouter()
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_MAX_MULTIPART_FILES = 1
+_MAX_MULTIPART_FIELDS = 1
+_MAX_FORM_FIELD_BYTES = 16 * 1024
+_MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+_REQUEST_BODY_CHUNK_TIMEOUT_SECONDS = 180.0
+_CONTROL_TOKEN_RE = re.compile(r"<\|[^>\r\n]{1,128}\|>")
 
 
 async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, int]:
@@ -40,12 +49,116 @@ async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, 
         raise
 
 
+async def _limited_request_stream(
+    request: Request,
+    max_body_bytes: int,
+) -> AsyncGenerator[bytes, None]:
+    total = 0
+    stream = request.stream()
+    stream_iter = stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(
+                anext(stream_iter),
+                timeout=_REQUEST_BODY_CHUNK_TIMEOUT_SECONDS,
+            )
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+            raise MultiPartException("Request body stalled") from None
+
+        total += len(chunk)
+        if total > max_body_bytes:
+            raise MultiPartException("Request body too large")
+        yield chunk
+
+
+async def _parse_transcribe_form(request: Request) -> FormData:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type != "multipart/form-data":
+        raise HTTPException(status_code=400, detail="multipart/form-data required")
+
+    max_body_bytes = request.app.state.settings.max_audio_bytes + _MAX_MULTIPART_OVERHEAD_BYTES
+    parser = MultiPartParser(
+        request.headers,
+        _limited_request_stream(request, max_body_bytes),
+        max_files=_MAX_MULTIPART_FILES,
+        max_fields=_MAX_MULTIPART_FIELDS,
+        max_part_size=_MAX_FORM_FIELD_BYTES,
+    )
+    try:
+        return await parser.parse()
+    except MultiPartException as exc:
+        if exc.message == "Request body too large":
+            status_code = 413
+        elif exc.message == "Request body stalled":
+            status_code = 408
+        else:
+            status_code = 400
+        raise HTTPException(status_code=status_code, detail=exc.message) from None
+    except OSError:
+        raise HTTPException(status_code=507, detail="Temporary upload storage exhausted") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid multipart body") from None
+
+
+def _get_audio_upload(form: FormData) -> UploadFile:
+    audio = form.get("audio")
+    if not isinstance(audio, UploadFile):
+        raise HTTPException(status_code=400, detail="Audio file is required")
+    return audio
+
+
+def _get_hotwords(form: FormData) -> str | None:
+    hotwords = form.get("hotwords")
+    if hotwords is None:
+        return None
+    if not isinstance(hotwords, str):
+        raise HTTPException(status_code=400, detail="hotwords must be a text field")
+    if _CONTROL_TOKEN_RE.search(hotwords):
+        raise HTTPException(status_code=400, detail="hotwords contain reserved control tokens")
+    return hotwords
+
+
 @router.post("/v1/transcribe")
 async def transcribe(
     request: Request,
-    audio: UploadFile,
     token_fingerprint: Annotated[str, Depends(verify_token)],
-    hotwords: str | None = None,
+) -> StreamingResponse:
+    # Keep auth ahead of multipart parsing. FastAPI parses body parameters before
+    # dependencies, so this route parses the form manually only after verify_token.
+    queue: TranscriptionQueue = request.app.state.queue
+    job = TranscriptionJob(token_fingerprint=token_fingerprint)
+    try:
+        queue.reserve(job)
+    except asyncio.QueueFull:
+        raise HTTPException(status_code=503, detail="Queue is full") from None
+
+    form: FormData | None = None
+    response_ready = False
+    try:
+        form = await _parse_transcribe_form(request)
+        audio = _get_audio_upload(form)
+        hotwords = _get_hotwords(form)
+
+        response = await _transcribe_authenticated(request, audio, job, hotwords)
+        response_ready = True
+        return response
+    finally:
+        if form is not None:
+            await form.close()
+        if not response_ready:
+            queue.cancel(job.job_id)
+
+
+async def _transcribe_authenticated(
+    request: Request,
+    audio: UploadFile,
+    job: TranscriptionJob,
+    hotwords: str | None,
 ) -> StreamingResponse:
     queue: TranscriptionQueue = request.app.state.queue
     max_audio_bytes: int = request.app.state.settings.max_audio_bytes
@@ -57,19 +170,17 @@ async def transcribe(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
-    job = TranscriptionJob(
-        token_fingerprint=token_fingerprint,
-        audio_mime=mime_type,
-        hotwords=hotwords,
-    )
+    job.audio_mime = mime_type
+    job.hotwords = hotwords
 
     try:
-        queue.reserve(job)
-    except asyncio.QueueFull:
-        raise HTTPException(status_code=503, detail="Queue is full") from None
-
-    try:
-        audio_path, _ = await _spool_upload(audio, max_audio_bytes)
+        try:
+            audio_path, _ = await _spool_upload(audio, max_audio_bytes)
+        except OSError:
+            raise HTTPException(
+                status_code=507,
+                detail="Temporary upload storage exhausted",
+            ) from None
         job.audio_path = audio_path
         try:
             job.audio_duration_seconds = await probe_duration_file(audio_path)

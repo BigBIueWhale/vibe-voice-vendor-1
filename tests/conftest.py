@@ -35,8 +35,6 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         asr_backend="vibevoice",
         vllm_base_url="http://127.0.0.1:9999",
-        server_host="127.0.0.1",
-        server_port=54912,
         max_audio_bytes=500 * 1024 * 1024,
         max_queue_size=5,
         jwt_public_key_file=str(key_file),

@@ -93,6 +93,26 @@ def test_key_is_valid_ec(tmp_path: Path) -> None:
     assert key.key_size == 256  # P-256
 
 
+def test_existing_bad_directory_mode_is_refused(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir(mode=0o755)
+    result = _generate_cert("h", 30, str(out))
+    assert "error" in result
+    assert "expected 700" in result["error"]
+
+
+def test_invalid_hostname_is_refused(tmp_path: Path) -> None:
+    result = _generate_cert("bad host", 30, str(tmp_path / "out"))
+    assert "error" in result
+    assert "hostname" in result["error"]
+
+
+def test_invalid_validity_days_are_refused(tmp_path: Path) -> None:
+    result = _generate_cert("h", 0, str(tmp_path / "out"))
+    assert "error" in result
+    assert "days must be between" in result["error"]
+
+
 # ── HTTP handler tests ───────────────────────────────────────────────
 
 
@@ -144,6 +164,27 @@ def test_handler_post_generate_overwrite(tmp_path: Path) -> None:
     body = raw.split("\r\n\r\n", 1)[1]
     data = json.loads(body)
     assert "error" in data
+
+
+def test_handler_rejects_invalid_json() -> None:
+    handler = _make_handler("POST", "/generate", b"{")
+    handler.do_POST()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
+    body = raw.split("\r\n\r\n", 1)[1]
+    data = json.loads(body)
+    assert "400" in raw
+    assert data["error"] == "Invalid JSON"
+
+
+def test_handler_rejects_oversized_body() -> None:
+    payload = b"x" * 4097
+    handler = _make_handler("POST", "/generate", payload)
+    handler.do_POST()
+    raw = cast(BytesIO, handler.wfile).getvalue().decode()
+    body = raw.split("\r\n\r\n", 1)[1]
+    data = json.loads(body)
+    assert "413" in raw
+    assert data["error"] == "Request body is too large"
 
 
 def test_handler_404() -> None:

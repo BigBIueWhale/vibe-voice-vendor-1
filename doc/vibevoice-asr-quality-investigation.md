@@ -100,6 +100,7 @@ If the quality issue is "not even as high as Whisper V3" for **general, short-fo
 
 ```
 --served-model-name vibevoice
+--host 127.0.0.1
 --trust-remote-code
 --dtype bfloat16
 --max-num-seqs 64
@@ -109,7 +110,6 @@ If the quality issue is "not even as high as Whisper V3" for **general, short-fo
 --enable-chunked-prefill
 --chat-template-content-format openai
 --tensor-parallel-size 1
---allowed-local-media-path /tmp
 --port 8000
 ```
 

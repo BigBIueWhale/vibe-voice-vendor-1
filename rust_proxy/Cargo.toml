@@ -6,21 +6,19 @@ description = "Self-contained TLS reverse proxy for VibeVoice ASR server"
 
 [dependencies]
 # Async runtime
-tokio = { version = "=1.49.0", features = ["full"] }
+tokio = { version = "=1.49.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
-# Web framework and HTTPS server
-axum = { version = "=0.8.8", features = ["ws", "macros"] }
-axum-server = { version = "=0.7.3", features = ["tls-rustls"] }
-
-# HTTP client for proxying requests to upstream
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
-
-# WebSocket client for proxying WS connections to upstream
-tokio-tungstenite = { version = "=0.26.2", features = ["rustls-tls-webpki-roots"] }
+# HTTP/1 transport, without a public web framework/router layer
+bytes = "=1.12.1"
+http = "=1.4.2"
+http-body = "=1.0.1"
+hyper = { version = "=1.10.1", default-features = false, features = ["client", "http1", "server"] }
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 
 # TLS primitives
-rustls = { version = "=0.23.36", features = ["ring"] }
-rustls-pemfile = "=2.2.0"
+rustls = { version = "=0.23.36", default-features = false, features = ["ring", "std", "logging"] }
+ring = "=0.17.14"
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging"] }
 
 # Self-signed certificate generation and expiry checking
 rcgen = "=0.13.2"
@@ -31,14 +29,15 @@ hostname = "=0.4.2"
 # CLI argument parsing
 clap = { version = "=4.5.39", features = ["derive"] }
 
-# Middleware
-tower-http = { version = "=0.6.8", features = ["limit"] }
-
 # Logging
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.22", features = ["env-filter"] }
 
-# Async stream utilities for WebSocket bidirectional forwarding
+# JWT parsing and verification support
+base64 = "=0.22.1"
+serde_json = "=1.0.149"
+
+# Async future utilities
 futures = "=0.3.32"
 
 # Body collection for HTTP proxying

@@ -1,11 +1,19 @@
+import asyncio
 import base64
 import shutil
 import struct
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from server.audio import detect_mime_type, encode_audio_base64, probe_duration, probe_duration_file
+from server.audio import (
+    compress_file_to_opus,
+    detect_mime_type,
+    encode_audio_base64,
+    probe_duration,
+    probe_duration_file,
+)
 
 has_ffprobe = shutil.which("ffprobe") is not None
 
@@ -18,6 +26,22 @@ class _FakeProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
+
+
+class _HangingProcess:
+    def __init__(self) -> None:
+        self.killed = False
+        self.returncode: int | None = None
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self.killed:
+            return b"", b""
+        await asyncio.sleep(3600)
+        return b"", b""
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
 
 
 def _make_wav(sample_rate: int = 16000, num_samples: int = 16000, num_channels: int = 1) -> bytes:
@@ -126,3 +150,90 @@ async def test_probe_duration_rejects_non_numeric_duration(
 
     with pytest.raises(RuntimeError, match="ffprobe duration is not numeric"):
         await probe_duration_file("audio.wav")
+
+
+async def test_probe_duration_uses_local_file_protocol_whitelist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_args: list[str] = []
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        captured_args[:] = [str(arg) for arg in args]
+        return _FakeProcess(b'{"format":{"duration":"1.25"}}')
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    assert await probe_duration_file("audio.wav") == 1.25
+    assert captured_args[:5] == [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-protocol_whitelist",
+        "file",
+    ]
+
+
+async def test_probe_duration_timeout_kills_ffprobe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _HangingProcess()
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _HangingProcess:
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("server.audio._FFPROBE_TIMEOUT_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="ffprobe timed out"):
+        await probe_duration_file("audio.wav")
+
+    assert process.killed
+
+
+async def test_compress_uses_bounded_local_ffmpeg_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_args: list[str] = []
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"fake audio")
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        captured_args[:] = [str(arg) for arg in args]
+        return _FakeProcess(b"")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    await compress_file_to_opus(str(src))
+
+    assert captured_args[:9] == [
+        "ffmpeg",
+        "-y",
+        "-nostdin",
+        "-threads",
+        "1",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-i",
+        str(src),
+    ]
+
+
+async def test_compress_timeout_kills_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _HangingProcess()
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"fake audio")
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _HangingProcess:
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("server.audio._FFMPEG_TIMEOUT_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="ffmpeg opus compression timed out"):
+        await compress_file_to_opus(str(src))
+
+    assert process.killed

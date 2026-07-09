@@ -1,9 +1,15 @@
-# Include only VibeVoice/ — everything else is the wrapper server,
-# client, proxy, tests, etc. and is not needed in the vLLM image.
+# Keep the Docker build context narrow: the vLLM image needs the pinned
+# VibeVoice checkout plus the isolated FastAPI runtime files, but not local
+# secrets, certs, tests, clients, proxy build output, or virtualenv state.
 *
 
-# Whitelist VibeVoice source needed for pip install
+# Whitelist files copied by Dockerfile
 !VibeVoice/
+!VibeVoice/**
+!server/
+!server/**
+!pyproject.toml
+!uv.lock
 
 # Exclude VibeVoice subdirectories not needed for pip install
 VibeVoice/.git/

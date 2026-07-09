@@ -13,6 +13,13 @@ from server.queue import TranscriptionQueue
 from server.routes import health, queue_status, transcribe
 from server.transcribe import process_groq_job, process_vibevoice_job
 
+_BACKEND_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+_BACKEND_HTTP_LIMITS = httpx.Limits(
+    max_connections=8,
+    max_keepalive_connections=2,
+    keepalive_expiry=10.0,
+)
+
 
 class RequireHTTPSMiddleware:
     """Reject non-HTTPS requests on protected endpoints (checks X-Forwarded-Proto)."""
@@ -26,7 +33,7 @@ class RequireHTTPSMiddleware:
         if scope["type"] == "http" and scope["path"] not in self._OPEN_PATHS:
             headers = dict(scope["headers"])
             proto_bytes = headers.get(b"x-forwarded-proto")
-            if proto_bytes is None or proto_bytes.decode().lower() != "https":
+            if proto_bytes is None or proto_bytes.lower() != b"https":
                 body = json.dumps({"detail": "HTTPS required"}).encode()
                 await send(
                     {
@@ -47,7 +54,13 @@ class RequireHTTPSMiddleware:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = app.state.settings
 
-    http_client = httpx.AsyncClient()
+    http_client = httpx.AsyncClient(
+        trust_env=False,
+        follow_redirects=False,
+        http2=False,
+        timeout=_BACKEND_HTTP_TIMEOUT,
+        limits=_BACKEND_HTTP_LIMITS,
+    )
     app.state.http_client = http_client
 
     queue = TranscriptionQueue(max_size=config.max_queue_size)
