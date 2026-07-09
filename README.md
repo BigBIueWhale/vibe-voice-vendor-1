@@ -1,14 +1,14 @@
 # VibeVoice ASR Server
 
-Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://github.com/microsoft/VibeVoice) model. Single-request processing via a bounded async queue, SSE streaming, transient private upload spooling with no persistent audio retention, TLS encryption, JWT bearer auth (ES256).
+Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://github.com/microsoft/VibeVoice) model. Single-request processing via a bounded async queue, SSE streaming, transient private upload spooling with no persistent audio retention, TLS 1.3 encryption, server SPKI pinning, mandatory mTLS client authentication, and JWT bearer auth (ES256).
 
 ## Architecture
 
 ```
-Internet (HTTPS :42862) -> vvv_proxy (self-signed TLS 1.3 + mandatory mTLS + ES256 JWT gate) -> FastAPI (Unix socket) -> ASR backend
+Internet (HTTPS :42862) -> vvv_proxy (TLS 1.3 + pinned server key + mandatory mTLS + ES256 JWT gate) -> FastAPI (Unix socket) -> ASR backend
 ```
 
-The public proxy accepts TLS 1.3 only. It requires a valid client TLS certificate during the TLS handshake, then verifies the ES256 bearer token and revocation list before accepting the HTTP request as authenticated. A peer without the local client certificate cannot reach HTTP routing, JWT parsing, request-body reads, FastAPI, or vLLM. Public `/health` is proxy-local after mTLS and JWT authentication and does not touch FastAPI or vLLM.
+The public proxy accepts TLS 1.3 only. Its certificate is a self-owned server identity container; clients authenticate it by the exported `sha256/...` SPKI pin, not by DNS, WebPKI, certificate SANs, or router behavior. The proxy requires a valid client TLS certificate during the TLS handshake, then verifies the ES256 bearer token and revocation list before accepting the HTTP request as authenticated. A peer without the local client certificate cannot reach HTTP routing, JWT parsing, request-body reads, FastAPI, or vLLM. Public `/health` is proxy-local after mTLS and JWT authentication and does not touch FastAPI or vLLM.
 
 FastAPI is reached by the Rust proxy over a private Unix domain socket in both supported setup modes; it does not bind a host TCP port. The proxy refuses symlinked or non-socket upstream paths, requires the socket directory to be `0700`, requires the socket itself to be `0600`, and verifies the connected Unix peer UID/GID before sending upstream HTTP bytes. With the local `vibevoice` backend, vLLM runs in a Docker network namespace created with `--network none`, FastAPI joins that namespace and talks to vLLM over namespace-local loopback (`127.0.0.1:8000` inside that namespace only), and the only host-facing backend path is the Unix socket consumed by the Rust proxy. The vLLM container does not get the socket mount, the JWT public key, or the revocation file.
 
@@ -22,7 +22,18 @@ Prerequisites: `docker` already usable by the current user (with NVIDIA GPU supp
 ./setup.sh
 ```
 
-The script handles everything inside the project boundary: cloning the pinned VibeVoice source, building the Docker image (~14 GB pinned model snapshot on first build), validating GPU passthrough inside that built image with Docker networking disabled, installing Python dependencies, generating or validating local auth artifacts, building the Rust TLS proxy, starting the local backend containers without Docker networking, rendering the systemd user service from the current checkout path, and waiting for strict health checks to pass.
+The script handles everything inside the project boundary: cloning the pinned VibeVoice source, building the Docker image (~14 GB pinned model snapshot on first build), validating GPU passthrough inside that built image with Docker networking disabled, installing Python dependencies, generating or validating local auth artifacts, building the Rust TLS proxy, starting the local backend containers without Docker networking, rendering the systemd user service from the current checkout path, exporting `certs/self-signed/server-spki-pin.txt`, and waiting for strict pinned-key/mTLS/JWT health checks to pass.
+
+The public service is IPv4-only by construction: the proxy listens on `0.0.0.0:42862`, not `[::]`, and examples use an IPv4-reachable host or IPv4 address. If you use DNS, publish an A record for this service and do not rely on an AAAA path. The setup output prints the Android fields directly:
+
+```text
+Android Server URL: https://HOST:42862
+Android Server public key pin: sha256/...
+Token: keys/token.txt
+Client cert/key: keys/client-cert.pem keys/client-key.pem
+```
+
+`HOST` is only routing. The Android Server public key pin is the server identity.
 
 `setup.sh` installs services for the checkout you run it from. The checkout path must use plain systemd-safe characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `/`, `@`, `+`, `-`); paths containing spaces, quotes, `$`, `%`, or other punctuation are rejected. Do not move the repository after setup; rerun `./setup.sh` from the new path instead.
 
@@ -94,52 +105,53 @@ See [doc/vibevoice-asr-quality-investigation.md](doc/vibevoice-asr-quality-inves
 
 ```bash
 # Transcribe a file
-vvv --server https://rtx5090:42862 \
+vvv --server https://HOST:42862 \
   --token YOUR_TOKEN \
-  --ca-cert certs/self-signed/fullchain.pem \
+  --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
   transcribe sample/recording_with_hebrew.wav
 
 # With hotwords
-vvv --server https://rtx5090:42862 \
+vvv --server https://HOST:42862 \
   --token YOUR_TOKEN \
-  --ca-cert certs/self-signed/fullchain.pem \
+  --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
   transcribe sample/recording_with_hebrew.wav --hotwords "VibeVoice,ASR"
 
 # Save to file
-vvv --server https://rtx5090:42862 \
+vvv --server https://HOST:42862 \
   --token YOUR_TOKEN \
-  --ca-cert certs/self-signed/fullchain.pem \
+  --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
   transcribe sample/recording_with_hebrew.wav --output transcript.txt
 
 # Check queue status
-vvv --server https://rtx5090:42862 \
+vvv --server https://HOST:42862 \
   --token YOUR_TOKEN \
-  --ca-cert certs/self-signed/fullchain.pem \
+  --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
   status
 ```
 
-`--ca-cert certs/self-signed/fullchain.pem` pins the self-signed server certificate generated by the proxy. `--client-cert` and `--client-key` present the local mTLS credential required by the public proxy before any HTTP request is accepted.
+`--server-pin` is the server identity check. The URL is only where the client dials; DNS names and certificate SANs do not authorize the server. `--client-cert` and `--client-key` present the local mTLS credential required by the public proxy before any HTTP request is accepted.
 
 ### Python Library
 
 ```python
 import asyncio
+from pathlib import Path
 from client.client import VibevoiceClient
 from client.models import EventType
 
 async def main():
     client = VibevoiceClient(
-        base_url="https://rtx5090:42862",
+        base_url="https://HOST:42862",
         token="YOUR_TOKEN",
-        verify="certs/self-signed/fullchain.pem",
+        server_pin=Path("certs/self-signed/server-spki-pin.txt").read_text().strip(),
         cert=("keys/client-cert.pem", "keys/client-key.pem"),
     )
 
@@ -166,40 +178,44 @@ asyncio.run(main())
 
 ```bash
 # Health check
-curl --cacert certs/self-signed/fullchain.pem \
+curl --insecure \
+  --pinnedpubkey "$(sed 's#^sha256/#sha256//#' certs/self-signed/server-spki-pin.txt)" \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -H "Authorization: Bearer $TOKEN" \
-  -s https://rtx5090:42862/health
+  -s https://HOST:42862/health
 # {"status":"ok","proxy":"ok"}
 
 # Queue status
-curl --cacert certs/self-signed/fullchain.pem \
+curl --insecure \
+  --pinnedpubkey "$(sed 's#^sha256/#sha256//#' certs/self-signed/server-spki-pin.txt)" \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -H "Authorization: Bearer $TOKEN" \
-  https://rtx5090:42862/v1/queue/status
+  https://HOST:42862/v1/queue/status
 # {"your_jobs":[],"total_queued":0}
 
 # Transcribe (streams SSE events)
-curl --cacert certs/self-signed/fullchain.pem \
+curl --insecure \
+  --pinnedpubkey "$(sed 's#^sha256/#sha256//#' certs/self-signed/server-spki-pin.txt)" \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N -H "Authorization: Bearer $TOKEN" \
   -F "audio=@sample/recording_with_hebrew.wav" \
-  https://rtx5090:42862/v1/transcribe
+  https://HOST:42862/v1/transcribe
 
 # Transcribe with hotwords
-curl --cacert certs/self-signed/fullchain.pem \
+curl --insecure \
+  --pinnedpubkey "$(sed 's#^sha256/#sha256//#' certs/self-signed/server-spki-pin.txt)" \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N -H "Authorization: Bearer $TOKEN" \
   -F "audio=@sample/recording_with_hebrew.wav" \
   -F "hotwords=VibeVoice,ASR" \
-  https://rtx5090:42862/v1/transcribe
+  https://HOST:42862/v1/transcribe
 ```
 
-`-s` silences progress and `-N` disables output buffering for streaming. The examples pin the self-signed server certificate and present the local mTLS client credential.
+`--pinnedpubkey` is mandatory in curl examples. `--insecure` disables curl's WebPKI/hostname authority so the SPKI pin is the sole server trust check; do not use it without `--pinnedpubkey`. `-s` silences progress and `-N` disables output buffering for streaming.
 
 The public proxy `/health` endpoint is intentionally cheap and proxy-local, but it still requires the same mTLS client credential and bearer token as the rest of the public surface. It only proves the public TLS proxy is alive and never reaches FastAPI or vLLM. The FastAPI server still exposes its internal `/health` endpoint for setup and local diagnostics over the backend Unix socket; with the local `vibevoice` backend it returns HTTP 503 with `{"status":"degraded",...}` if vLLM is unreachable or returns a non-200 health response.
 
@@ -214,6 +230,7 @@ The public proxy `/health` endpoint is intentionally cheap and proxy-local, but 
 uv run python -m scripts.generate_token --keys-dir keys --subject user
 
 # Token is saved to keys/token.txt with 0600 permissions and a bounded expiry.
+# Server identity pin is saved to certs/self-signed/server-spki-pin.txt.
 # mTLS client credentials are saved to keys/client-cert.pem and keys/client-key.pem.
 uv run python -m scripts.generate_client_cert --certs-dir certs/self-signed --keys-dir keys --subject user
 

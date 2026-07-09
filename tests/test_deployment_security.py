@@ -266,13 +266,14 @@ def test_public_proxy_requires_mtls_by_construction() -> None:
 
     assert "--client-cert" in client
     assert "--client-key" in client
+    assert "--server-pin" in client
     assert "load_cert_chain" in client
     assert "cert=self._cert" not in client
     assert "--client-cert" in docs
     assert "--client-key" in docs
+    assert "--server-pin" in docs
     assert "curl -sk" not in docs
     assert "curl -k" not in docs
-    assert "--insecure" not in docs
 
     forbidden = [
         "keys/client-key.pem:/",
@@ -282,6 +283,49 @@ def test_public_proxy_requires_mtls_by_construction() -> None:
         assert value not in setup
 
     assert "$CLIENT_KEY" in setup
+
+
+def test_public_clients_use_exact_server_spki_pin_not_ca_or_hostname_authority() -> None:
+    setup = _read("setup.sh")
+    proxy_source = _read("rust_proxy/src/main.rs")
+    cert_generator = _read("scripts/generate_cert.py")
+    cli = _read("client/cli.py")
+    client = _read("client/client.py")
+    docs = _read("README.md")
+    env_example = _read("deploy/env.example")
+
+    assert "--server-spki-pin-path" in setup
+    assert "--server-spki-pin-path" in env_example
+    assert "--server-spki-pin-path" in cert_generator
+    assert "SERVER_CERT_COMMON_NAME" in proxy_source
+    assert "VVV Sovereign Server" in proxy_source
+    assert "subject_alt_names = Vec::new()" in proxy_source
+    assert "server_spki_pin_from_cert_path" in proxy_source
+    assert "Server SPKI pin" in proxy_source
+
+    assert "server-spki-pin.txt" in setup
+    assert "server-spki-pin.txt" in docs
+    assert "Android Server public key pin" in setup
+    assert "Android Server public key pin" in docs
+    assert "pinnedpubkey" in setup
+    assert "--pinnedpubkey" in docs
+    assert 'printf \'insecure\\npinnedpubkey = "%s"\\ncert = "%s"\\nkey = "%s"\\n\'' in setup
+
+    assert "ssl.create_default_context" not in client
+    assert "cafile" not in client
+    assert "capath" not in client
+    assert "check_hostname = False" in client
+    assert "verify_mode = ssl.CERT_NONE" in client
+    assert "_spki_pin_from_certificate_der" in client
+    assert "_normalize_server_pin" in client
+    assert "getpeercert(binary_form=True)" in client
+    assert "server public key pin mismatch" in client
+
+    assert "--ca-cert" not in cli
+    assert "--ca-cert" not in docs
+    assert "public CA" not in docs.lower()
+    assert "hostname verification" not in docs.lower()
+    assert "certificate SANs do not authorize the server" in docs
 
 
 def test_user_units_do_not_use_mount_namespace_sandboxing() -> None:
@@ -313,6 +357,8 @@ def test_public_proxy_has_no_tokenless_http_routes() -> None:
     assert proxy_source.index(auth_check) < proxy_source.index(health_check)
 
     assert 'Authorization: Bearer %s' in setup
+    assert 'pinnedpubkey = "%s"' in setup
+    assert "read_server_pin_for_curl" in setup
     authenticated_health_curl = (
         '--config "$tls_config" --config "$auth_config" '
         '-s -o "$body_file" -w \'%{http_code}\' '

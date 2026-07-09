@@ -66,7 +66,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="vvv", description="VibeVoice ASR client")
     parser.add_argument("--server", required=True, help="Server URL (e.g. https://asr.example.com)")
     parser.add_argument("--token", required=True, help="Bearer token for authentication")
-    parser.add_argument("--ca-cert", help="Path to CA certificate for self-signed TLS")
+    parser.add_argument(
+        "--server-pin",
+        required=True,
+        help="Expected server public key pin from certs/self-signed/server-spki-pin.txt",
+    )
     parser.add_argument("--client-cert", required=True, help="Path to mTLS client certificate")
     parser.add_argument("--client-key", required=True, help="Path to mTLS client private key")
 
@@ -81,9 +85,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.ca_cert and not Path(args.ca_cert).exists():
-        print(f"CA cert file not found: {args.ca_cert}", file=sys.stderr)
-        sys.exit(1)
     if not Path(args.client_cert).exists():
         print(f"Client cert file not found: {args.client_cert}", file=sys.stderr)
         sys.exit(1)
@@ -91,12 +92,10 @@ def main() -> None:
         print(f"Client key file not found: {args.client_key}", file=sys.stderr)
         sys.exit(1)
 
-    verify: bool | str = args.ca_cert or True
-
     client = VibevoiceClient(
         base_url=args.server,
         token=args.token,
-        verify=verify,
+        server_pin=args.server_pin,
         cert=(args.client_cert, args.client_key),
     )
 

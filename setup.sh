@@ -28,6 +28,7 @@ BACKEND_SOCKET_DIR="/tmp/vibevoice-vendor-$HOST_UID"
 BACKEND_SOCKET_HOST="$BACKEND_SOCKET_DIR/server.sock"
 BACKEND_SOCKET_CONTAINER="/run/vibevoice/server.sock"
 CERT_DIR="$INSTALL_DIR/certs/self-signed"
+SERVER_SPKI_PIN="$CERT_DIR/server-spki-pin.txt"
 CLIENT_CA_CERT="$CERT_DIR/client-ca.pem"
 CLIENT_CERT="$INSTALL_DIR/keys/client-cert.pem"
 CLIENT_KEY="$INSTALL_DIR/keys/client-key.pem"
@@ -448,6 +449,16 @@ ensure_auth_artifacts() {
     fi
 }
 
+read_server_pin_for_curl() {
+    [[ -f "$SERVER_SPKI_PIN" && ! -L "$SERVER_SPKI_PIN" ]] \
+        || die "$SERVER_SPKI_PIN does not exist; the proxy did not export its server identity pin"
+    local pin
+    pin="$(tr -d '\r\n' < "$SERVER_SPKI_PIN")"
+    [[ "$pin" =~ ^sha256/[A-Za-z0-9+/]+=*$ ]] \
+        || die "$SERVER_SPKI_PIN must contain a sha256/<base64> SPKI pin"
+    printf 'sha256//%s\n' "${pin#sha256/}"
+}
+
 build_proxy() {
     echo "Building Rust TLS proxy..."
     (cd rust_proxy && cargo build --release)
@@ -532,6 +543,7 @@ ExecStart=$INSTALL_DIR/rust_proxy/target/release/vvv_proxy \\
     --revoked-tokens-file $INSTALL_DIR/revoked_tokens.txt \\
     --cert-path $CERT_DIR/fullchain.pem \\
     --key-path $CERT_DIR/privkey.pem \\
+    --server-spki-pin-path $SERVER_SPKI_PIN \\
     --client-ca-cert-path $CLIENT_CA_CERT \\
     --cert-validity-days 3650 \\
     --cert-check-interval-secs 3600
@@ -572,6 +584,7 @@ ExecStart=$INSTALL_DIR/rust_proxy/target/release/vvv_proxy \\
     --revoked-tokens-file $INSTALL_DIR/revoked_tokens.txt \\
     --cert-path $CERT_DIR/fullchain.pem \\
     --key-path $CERT_DIR/privkey.pem \\
+    --server-spki-pin-path $SERVER_SPKI_PIN \\
     --client-ca-cert-path $CLIENT_CA_CERT \\
     --cert-validity-days 3650 \\
     --cert-check-interval-secs 3600
@@ -681,11 +694,13 @@ verify_full_stack() {
     local auth_config
     auth_config="$(mktemp)"
     chmod 600 "$auth_config"
+    local curl_pin
+    curl_pin="$(read_server_pin_for_curl)"
     local token
     token="$(tr -d '\r\n' < keys/token.txt)"
     [[ -n "$token" ]] || die "keys/token.txt is empty"
-    printf 'cacert = "%s"\ncert = "%s"\nkey = "%s"\n' \
-        "$CERT_DIR/fullchain.pem" "$CLIENT_CERT" "$CLIENT_KEY" > "$tls_config"
+    printf 'insecure\npinnedpubkey = "%s"\ncert = "%s"\nkey = "%s"\n' \
+        "$curl_pin" "$CLIENT_CERT" "$CLIENT_KEY" > "$tls_config"
     printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_config"
 
     local code
@@ -760,5 +775,7 @@ else
     echo "  Server: unix://$BACKEND_SOCKET_HOST"
 fi
 echo "  Proxy:  https://127.0.0.1:$PROXY_PORT"
+echo "  Android Server URL: https://HOST:$PROXY_PORT"
+echo "  Android Server public key pin: $(tr -d '\r\n' < "$SERVER_SPKI_PIN")"
 echo "  Token:  keys/token.txt"
 echo "  Client cert/key: keys/client-cert.pem keys/client-key.pem"

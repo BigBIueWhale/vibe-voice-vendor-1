@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import stat
 from io import BytesIO
@@ -9,9 +11,14 @@ from unittest.mock import MagicMock
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_private_key,
+)
+from cryptography.x509.oid import NameOID
 
-from scripts.generate_cert import _generate_cert, _RequestHandler
+from scripts.generate_cert import _SERVER_CERT_COMMON_NAME, _generate_cert, _RequestHandler
 
 
 class _FakeRfile(BytesIO):
@@ -37,34 +44,53 @@ def _make_handler(method: str, path: str, body: bytes = b"") -> _RequestHandler:
 
 
 def test_generates_cert_and_key(tmp_path: Path) -> None:
-    result = _generate_cert("myhost", 365, str(tmp_path / "out"))
+    result = _generate_cert(365, str(tmp_path / "out"))
     assert "cert_path" in result
     assert "key_path" in result
+    assert "server_spki_pin_path" in result
+    assert "server_spki_pin" in result
     assert Path(result["cert_path"]).exists()
     assert Path(result["key_path"]).exists()
+    assert Path(result["server_spki_pin_path"]).exists()
 
 
-def test_cert_has_correct_sans(tmp_path: Path) -> None:
-    _generate_cert("example.com", 365, str(tmp_path / "out"))
+def test_cert_has_no_san_hostname_authority(tmp_path: Path) -> None:
+    _generate_cert(365, str(tmp_path / "out"))
     cert_pem = (tmp_path / "out" / "fullchain.pem").read_bytes()
     cert = x509.load_pem_x509_certificate(cert_pem)
-    san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-    dns_names = san.value.get_values_for_type(x509.DNSName)
-    assert "example.com" in dns_names
-    assert "localhost" in dns_names
+    try:
+        cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except x509.ExtensionNotFound:
+        pass
+    else:
+        raise AssertionError("server identity certificate must not contain SAN names")
 
 
 def test_cert_common_name(tmp_path: Path) -> None:
-    _generate_cert("myhost.local", 30, str(tmp_path / "out"))
+    _generate_cert(30, str(tmp_path / "out"))
     cert_pem = (tmp_path / "out" / "fullchain.pem").read_bytes()
     cert = x509.load_pem_x509_certificate(cert_pem)
-    cn = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
-    assert cn[0].value == "myhost.local"
+    cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    assert cn[0].value == _SERVER_CERT_COMMON_NAME
+
+
+def test_server_spki_pin_matches_generated_certificate(tmp_path: Path) -> None:
+    result = _generate_cert(30, str(tmp_path / "out"))
+    cert = x509.load_pem_x509_certificate(Path(result["cert_path"]).read_bytes())
+    spki = cert.public_key().public_bytes(
+        encoding=Encoding.DER,
+        format=PublicFormat.SubjectPublicKeyInfo,
+    )
+    expected = "sha256/" + base64.b64encode(hashlib.sha256(spki).digest()).decode("ascii")
+
+    assert result["server_spki_pin"] == expected
+    assert Path(result["server_spki_pin_path"]).read_text() == expected + "\n"
+    assert len(base64.b64decode(expected.removeprefix("sha256/"), validate=True)) == 32
 
 
 def test_custom_days(tmp_path: Path) -> None:
 
-    _generate_cert("h", 10, str(tmp_path / "out"))
+    _generate_cert(10, str(tmp_path / "out"))
     cert_pem = (tmp_path / "out" / "fullchain.pem").read_bytes()
     cert = x509.load_pem_x509_certificate(cert_pem)
     delta = cert.not_valid_after_utc - cert.not_valid_before_utc
@@ -73,20 +99,27 @@ def test_custom_days(tmp_path: Path) -> None:
 
 def test_overwrite_refused(tmp_path: Path) -> None:
     certs_dir = str(tmp_path / "out")
-    _generate_cert("h", 30, certs_dir)
-    result = _generate_cert("h", 30, certs_dir)
+    _generate_cert(30, certs_dir)
+    result = _generate_cert(30, certs_dir)
     assert "error" in result
 
 
 def test_key_permissions(tmp_path: Path) -> None:
-    _generate_cert("h", 30, str(tmp_path / "out"))
+    _generate_cert(30, str(tmp_path / "out"))
     key_path = tmp_path / "out" / "privkey.pem"
     mode = key_path.stat().st_mode & 0o777
     assert mode == stat.S_IRUSR | stat.S_IWUSR  # 0o600
 
 
+def test_public_artifact_permissions(tmp_path: Path) -> None:
+    _generate_cert(30, str(tmp_path / "out"))
+    for path in (tmp_path / "out" / "fullchain.pem", tmp_path / "out" / "server-spki-pin.txt"):
+        mode = path.stat().st_mode & 0o777
+        assert mode == stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+
+
 def test_key_is_valid_ec(tmp_path: Path) -> None:
-    _generate_cert("h", 30, str(tmp_path / "out"))
+    _generate_cert(30, str(tmp_path / "out"))
     key_bytes = (tmp_path / "out" / "privkey.pem").read_bytes()
     key = load_pem_private_key(key_bytes, password=None)
     assert isinstance(key, ec.EllipticCurvePrivateKey)
@@ -96,19 +129,13 @@ def test_key_is_valid_ec(tmp_path: Path) -> None:
 def test_existing_bad_directory_mode_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "out"
     out.mkdir(mode=0o755)
-    result = _generate_cert("h", 30, str(out))
+    result = _generate_cert(30, str(out))
     assert "error" in result
     assert "expected 700" in result["error"]
 
 
-def test_invalid_hostname_is_refused(tmp_path: Path) -> None:
-    result = _generate_cert("bad host", 30, str(tmp_path / "out"))
-    assert "error" in result
-    assert "hostname" in result["error"]
-
-
 def test_invalid_validity_days_are_refused(tmp_path: Path) -> None:
-    result = _generate_cert("h", 0, str(tmp_path / "out"))
+    result = _generate_cert(0, str(tmp_path / "out"))
     assert "error" in result
     assert "days must be between" in result["error"]
 
@@ -134,7 +161,6 @@ def test_handler_get_unknown_returns_404() -> None:
 def test_handler_post_generate(tmp_path: Path) -> None:
     payload = json.dumps(
         {
-            "hostname": "test.local",
             "days": 30,
             "certs_dir": str(tmp_path / "gen"),
         }
@@ -146,14 +172,15 @@ def test_handler_post_generate(tmp_path: Path) -> None:
     data = json.loads(body)
     assert "cert_path" in data
     assert Path(data["cert_path"]).exists()
+    assert data["server_spki_pin"].startswith("sha256/")
+    assert Path(data["server_spki_pin_path"]).exists()
 
 
 def test_handler_post_generate_overwrite(tmp_path: Path) -> None:
     certs_dir = str(tmp_path / "gen")
-    _generate_cert("h", 30, certs_dir)
+    _generate_cert(30, certs_dir)
     payload = json.dumps(
         {
-            "hostname": "h",
             "days": 30,
             "certs_dir": certs_dir,
         }

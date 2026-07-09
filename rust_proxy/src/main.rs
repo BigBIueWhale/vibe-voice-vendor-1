@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use bytes::Bytes;
 use clap::Parser;
 use futures::FutureExt;
@@ -27,6 +30,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use ring::digest;
 use ring::signature::{self, UnparsedPublicKey};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -88,6 +92,10 @@ struct Args {
     /// Path to TLS private key PEM file
     #[arg(long)]
     key_path: String,
+
+    /// Path to write the public sha256/<base64 SPKI> server identity pin
+    #[arg(long)]
+    server_spki_pin_path: String,
 
     /// Path to client CA certificate PEM file for mandatory mTLS
     #[arg(long)]
@@ -171,6 +179,8 @@ const MAX_PUBLIC_CONNECTIONS: usize = 128;
 const TCP_LISTEN_BACKLOG: u32 = MAX_PUBLIC_CONNECTIONS as u32;
 const TLS_ALPN_HTTP1: &[u8] = b"http/1.1";
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVER_CERT_COMMON_NAME: &str = "VVV Sovereign Server";
+const SERVER_SPKI_PIN_PREFIX: &str = "sha256/";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -320,6 +330,22 @@ fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 }
 
+fn write_public_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Self-Signed Certificate Management
 // ============================================================================
@@ -333,7 +359,7 @@ fn generate_self_signed_cert(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rcgen::{CertificateParams, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
 
-    info!("Generating self-signed certificate");
+    info!("Generating self-signed server identity certificate");
 
     if let Some(parent) = cert_path.parent() {
         std::fs::create_dir_all(parent)
@@ -356,68 +382,115 @@ fn generate_self_signed_cert(
         }
     }
 
-    let hostname_str: String = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "localhost".to_string());
-
     let mut params = CertificateParams::default();
     params
         .distinguished_name
-        .push(DnType::CommonName, &hostname_str);
-    params.subject_alt_names = vec![
-        rcgen::SanType::DnsName(
-            hostname_str
-                .clone()
-                .try_into()
-                .map_err(|e| format!("Invalid hostname for SAN: {hostname_str:?}, error: {e}"))?,
-        ),
-        rcgen::SanType::DnsName(
-            "localhost"
-                .to_string()
-                .try_into()
-                .map_err(|e| format!("Invalid 'localhost' SAN (should never happen): {e}"))?,
-        ),
-        rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-    ];
+        .push(DnType::CommonName, SERVER_CERT_COMMON_NAME);
+    params.subject_alt_names = Vec::new();
 
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now;
     params.not_after = now + time::Duration::days(i64::from(validity_days));
 
-    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .map_err(|e| format!("Failed to generate ECDSA P-256 key pair: {e}"))?;
+    let key_pair = if key_path.exists() {
+        let metadata = fs::symlink_metadata(key_path)
+            .map_err(|e| format!("Failed to inspect key {}: {e}", key_path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(format!("Server key {} must be a regular file", key_path.display()).into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                return Err(format!(
+                    "Server key {} mode is {mode:03o}, expected 600",
+                    key_path.display()
+                )
+                .into());
+            }
+        }
+        let pem = fs::read_to_string(key_path)
+            .map_err(|e| format!("Failed to read existing key {}: {e}", key_path.display()))?;
+        KeyPair::from_pem(&pem).map_err(|e| {
+            format!(
+                "Failed to parse existing server key {}: {e}",
+                key_path.display()
+            )
+        })?
+    } else {
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+            .map_err(|e| format!("Failed to generate ECDSA P-256 key pair: {e}"))?;
+        write_private_file(key_path, key_pair.serialize_pem().as_bytes())
+            .map_err(|e| format!("Failed to write key to {}: {e}", key_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    format!(
+                        "Failed to restrict key permissions on {}: {e}",
+                        key_path.display()
+                    )
+                },
+            )?;
+        }
+        key_pair
+    };
     let cert = params
         .self_signed(&key_pair)
         .map_err(|e| format!("Failed to self-sign certificate: {e}"))?;
 
     std::fs::write(cert_path, cert.pem())
         .map_err(|e| format!("Failed to write cert to {}: {e}", cert_path.display()))?;
-    write_private_file(key_path, key_pair.serialize_pem().as_bytes())
-        .map_err(|e| format!("Failed to write key to {}: {e}", key_path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |e| {
-                format!(
-                    "Failed to restrict key permissions on {}: {e}",
-                    key_path.display()
-                )
-            },
-        )?;
-    }
 
     info!(
-        cn = %hostname_str,
         cert = %cert_path.display(),
         key = %key_path.display(),
         valid_days = validity_days,
-        "Self-signed certificate generated"
+        "Self-signed server identity certificate generated"
     );
 
     Ok(())
+}
+
+fn server_spki_pin_from_cert_path(
+    cert_path: &Path,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let cert_data = fs::read(cert_path)?;
+    for pem in Pem::iter_from_buffer(&cert_data) {
+        let pem = pem.map_err(|e| format!("invalid certificate PEM: {e:?}"))?;
+        if pem.label != "CERTIFICATE" {
+            continue;
+        }
+        let x509 = pem
+            .parse_x509()
+            .map_err(|e| format!("invalid X.509 server certificate: {e:?}"))?;
+        let spki_hash = digest::digest(&digest::SHA256, x509.tbs_certificate.subject_pki.raw);
+        return Ok(format!(
+            "{SERVER_SPKI_PIN_PREFIX}{}",
+            STANDARD.encode(spki_hash.as_ref())
+        ));
+    }
+    Err("server certificate PEM does not contain a CERTIFICATE block".into())
+}
+
+fn write_server_spki_pin(
+    cert_path: &Path,
+    pin_path: &Path,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let pin = server_spki_pin_from_cert_path(cert_path)?;
+    if let Some(parent) = pin_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create pin directory {}: {e}", parent.display()))?;
+    }
+    write_public_file(pin_path, format!("{pin}\n").as_bytes()).map_err(|e| {
+        format!(
+            "Failed to write server SPKI pin to {}: {e}",
+            pin_path.display()
+        )
+    })?;
+    Ok(pin)
 }
 
 /// Check whether a PEM certificate file is still valid.
@@ -426,6 +499,17 @@ fn check_cert_expiry(cert_path: &Path) -> Option<Duration> {
     let cert_data = std::fs::read(cert_path).ok()?;
     let pem = Pem::iter_from_buffer(&cert_data).next()?.ok()?;
     let x509 = pem.parse_x509().ok()?;
+    let common_name = x509
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())?;
+    if common_name != SERVER_CERT_COMMON_NAME {
+        return None;
+    }
+    if x509.subject_alternative_name().ok().flatten().is_some() {
+        return None;
+    }
     let remaining = x509.validity().time_to_expiration()?;
     let secs = remaining.whole_seconds();
     if secs < 0 {
@@ -518,6 +602,7 @@ fn build_tls_config(
 async fn cert_renewal_task(
     cert_path: PathBuf,
     key_path: PathBuf,
+    server_spki_pin_path: PathBuf,
     client_ca_cert_path: PathBuf,
     validity_days: u32,
     check_interval_secs: u64,
@@ -535,6 +620,13 @@ async fn cert_renewal_task(
         if let Err(e) = generate_self_signed_cert(&cert_path, &key_path, validity_days) {
             error!(error = %e, "Certificate regeneration failed");
             continue;
+        }
+        match write_server_spki_pin(&cert_path, &server_spki_pin_path) {
+            Ok(pin) => info!(pin = %pin, "Server SPKI pin refreshed"),
+            Err(e) => {
+                error!(error = %e, "Failed to refresh server SPKI pin");
+                continue;
+            }
         }
         match build_tls_config(&cert_path, &key_path, &client_ca_cert_path) {
             Ok(config) => match tls_config.write() {
@@ -1380,6 +1472,7 @@ async fn main() {
 
     let cert_path = PathBuf::from(&args.cert_path);
     let key_path = PathBuf::from(&args.key_path);
+    let server_spki_pin_path = PathBuf::from(&args.server_spki_pin_path);
     let client_ca_cert_path = PathBuf::from(&args.client_ca_cert_path);
 
     // Ensure a valid certificate exists before starting the server.
@@ -1397,6 +1490,14 @@ async fn main() {
                 .unwrap_or_else(|e| panic!("Failed to generate initial certificate: {e}"));
         }
     }
+    let server_spki_pin =
+        write_server_spki_pin(&cert_path, &server_spki_pin_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to write server SPKI pin from cert={} to {}: {e}",
+                cert_path.display(),
+                server_spki_pin_path.display()
+            )
+        });
 
     let tls_config = make_shared_tls_config(
         build_tls_config(&cert_path, &key_path, &client_ca_cert_path).unwrap_or_else(|e| {
@@ -1413,6 +1514,7 @@ async fn main() {
     tokio::spawn(cert_renewal_task(
         cert_path.clone(),
         key_path.clone(),
+        server_spki_pin_path.clone(),
         client_ca_cert_path.clone(),
         args.cert_validity_days,
         args.cert_check_interval_secs,
@@ -1440,6 +1542,7 @@ async fn main() {
 
     info!("VibeVoice TLS Proxy ready");
     info!("  HTTPS: https://{}:{}", args.listen_host, args.listen_port);
+    info!("  Server SPKI pin: {}", server_spki_pin);
     info!("  Upstream UDS: {}", upstream.socket_path.display());
 
     let listener = bind_public_listener(listen_addr)
@@ -1617,7 +1720,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
 
     #[cfg(unix)]
     #[test]
-    fn generated_tls_private_key_is_private_at_rest() {
+    fn generated_tls_identity_has_private_key_and_public_pin() {
         use std::os::unix::fs::PermissionsExt;
 
         let unique = format!(
@@ -1631,8 +1734,11 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
         let dir = std::env::temp_dir().join(unique);
         let cert_path = dir.join("fullchain.pem");
         let key_path = dir.join("privkey.pem");
+        let pin_path = dir.join("server-spki-pin.txt");
 
         generate_self_signed_cert(&cert_path, &key_path, 1).expect("generate cert");
+        let pin = write_server_spki_pin(&cert_path, &pin_path).expect("write SPKI pin");
+        let original_key = fs::read_to_string(&key_path).expect("read generated key");
 
         assert_eq!(
             dir.metadata().expect("dir metadata").permissions().mode() & 0o777,
@@ -1647,6 +1753,46 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
                 & 0o777,
             0o600
         );
+        assert!(pin.starts_with(SERVER_SPKI_PIN_PREFIX));
+        assert_eq!(
+            fs::read_to_string(&pin_path).expect("read pin file"),
+            format!("{pin}\n")
+        );
+        assert_eq!(
+            pin_path
+                .metadata()
+                .expect("pin metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+
+        let cert_data = fs::read(&cert_path).expect("read cert");
+        let pem = Pem::iter_from_buffer(&cert_data)
+            .next()
+            .expect("one cert")
+            .expect("valid cert pem");
+        let cert = pem.parse_x509().expect("parse cert");
+        let common_name = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .expect("common name");
+        assert_eq!(common_name, SERVER_CERT_COMMON_NAME);
+        assert!(cert
+            .subject_alternative_name()
+            .expect("valid SAN state")
+            .is_none());
+
+        generate_self_signed_cert(&cert_path, &key_path, 2).expect("renew cert");
+        let renewed_pin = write_server_spki_pin(&cert_path, &pin_path).expect("write renewed pin");
+        assert_eq!(
+            fs::read_to_string(&key_path).expect("read renewed key"),
+            original_key
+        );
+        assert_eq!(renewed_pin, pin);
 
         let _ = fs::remove_dir_all(&dir);
     }

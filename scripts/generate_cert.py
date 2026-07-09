@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.server
-import ipaddress
 import json
 import os
 import stat
@@ -21,8 +22,8 @@ _CERT_MODE = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
 _DIR_MODE = stat.S_IRWXU
 _KEY_MODE = stat.S_IRUSR | stat.S_IWUSR
 _MAX_GENERATE_BODY_BYTES = 4096
-_MAX_HOSTNAME_BYTES = 253
 _MAX_VALIDITY_DAYS = 3650
+_SERVER_CERT_COMMON_NAME = "VVV Sovereign Server"
 
 _HTML_PAGE = """\
 <!DOCTYPE html>
@@ -60,9 +61,6 @@ _HTML_PAGE = """\
 <div class="container">
   <h1>VVV Certificate Generator</h1>
   <form id="form">
-    <label for="hostname">Hostname</label>
-    <input id="hostname" name="hostname" placeholder="Enter hostname" required>
-
     <label for="days">Validity (days)</label>
     <input id="days" name="days" type="number" placeholder="Enter validity (days)" min="1" required>
 
@@ -87,7 +85,6 @@ document.getElementById("form").addEventListener("submit", async (e) => {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        hostname: document.getElementById("hostname").value,
         days: parseInt(document.getElementById("days").value, 10),
         certs_dir: document.getElementById("certs_dir").value,
       }),
@@ -99,6 +96,8 @@ document.getElementById("form").addEventListener("submit", async (e) => {
       result.innerHTML = '<div class="success">'
         + '<div class="label">Certificate:</div><pre>' + data.cert_path + '</pre>'
         + '<div class="label">Private key:</div><pre>' + data.key_path + '</pre>'
+        + '<div class="label">Android Server public key pin:</div><pre>'
+        + data.server_spki_pin + '</pre>'
         + '<div class="label">Use with the Rust TLS proxy:</div>'
         + '<pre>./rust_proxy/target/release/vvv_proxy \\\\\n'
         + '  --upstream-uds "$HOME/.config/vibevoice-vendor/run/server.sock" \\\\\n'
@@ -109,13 +108,11 @@ document.getElementById("form").addEventListener("submit", async (e) => {
         + '  --revoked-tokens-file ./revoked_tokens.txt \\\\\n'
         + '  --cert-path ' + data.cert_path + ' \\\\\n'
         + '  --key-path ' + data.key_path + ' \\\\\n'
+        + '  --server-spki-pin-path ' + data.server_spki_pin_path + ' \\\\\n'
         + '  --client-ca-cert-path ./certs/self-signed/client-ca.pem \\\\\n'
         + '  --cert-validity-days 3650 \\\\\n'
         + '  --cert-check-interval-secs 3600</pre>'
-        + '<div class="label">Connect client with self-signed cert:</div>'
-        + '<pre>vvv --server https://HOST:42862 --token TOKEN --ca-cert ' + data.cert_path
-        + ' --client-cert ./keys/client-cert.pem --client-key ./keys/client-key.pem'
-        + ' transcribe audio.wav</pre>'
+        + '<div class="label">Android Server URL:</div><pre>https://HOST:42862</pre>'
         + '</div>';
     }
     result.style.display = "block";
@@ -182,37 +179,16 @@ def _validate_days(days: int) -> None:
         raise ValueError(f"days must be between 1 and {_MAX_VALIDITY_DAYS}")
 
 
-def _hostname_san(hostname: str) -> x509.GeneralName:
-    try:
-        return x509.IPAddress(ipaddress.ip_address(hostname))
-    except ValueError:
-        pass
-
-    labels = hostname.split(".")
-    for label in labels:
-        if not 1 <= len(label) <= 63:
-            raise ValueError("hostname contains an invalid DNS label length")
-        if label.startswith("-") or label.endswith("-"):
-            raise ValueError("hostname labels must not start or end with '-'")
-        if not all(char.isascii() and (char.isalnum() or char == "-") for char in label):
-            raise ValueError("hostname must contain only ASCII letters, digits, '-' and '.'")
-    return x509.DNSName(hostname)
-
-
-def _validate_hostname(hostname: str) -> x509.GeneralName:
-    if not hostname:
-        raise ValueError("hostname must not be empty")
-    if len(hostname.encode("utf-8")) > _MAX_HOSTNAME_BYTES:
-        raise ValueError(f"hostname exceeds {_MAX_HOSTNAME_BYTES} bytes")
-    if hostname != hostname.strip():
-        raise ValueError("hostname must not have leading or trailing whitespace")
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in hostname):
-        raise ValueError("hostname must not contain control characters")
-    return _hostname_san(hostname)
+def _server_spki_pin(private_key: ec.EllipticCurvePrivateKey) -> str:
+    spki = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    digest = hashlib.sha256(spki).digest()
+    return "sha256/" + base64.b64encode(digest).decode("ascii")
 
 
 def _generate_cert(
-    hostname: str,
     days: int,
     certs_dir: str,
 ) -> dict[str, str]:
@@ -224,13 +200,13 @@ def _generate_cert(
     out = Path(certs_dir)
     cert_path = out / "fullchain.pem"
     key_path = out / "privkey.pem"
+    pin_path = out / "server-spki-pin.txt"
 
-    if cert_path.exists() or key_path.exists():
+    if cert_path.exists() or key_path.exists() or pin_path.exists():
         return {"error": f"Certificate files already exist in {out}. Remove them first."}
 
     try:
         _validate_days(days)
-        primary_san = _validate_hostname(hostname)
         _create_or_validate_directory(out)
     except ValueError as exc:
         return {"error": str(exc)}
@@ -239,15 +215,7 @@ def _generate_cert(
 
     subject = issuer = x509.Name(
         [
-            x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-        ]
-    )
-
-    san = x509.SubjectAlternativeName(
-        [
-            primary_san,
-            x509.DNSName("localhost"),
-            x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+            x509.NameAttribute(NameOID.COMMON_NAME, _SERVER_CERT_COMMON_NAME),
         ]
     )
 
@@ -260,11 +228,12 @@ def _generate_cert(
         .serial_number(x509.random_serial_number())
         .not_valid_before(now)
         .not_valid_after(now + timedelta(days=days))
-        .add_extension(san, critical=False)
         .sign(private_key, hashes.SHA256())
     )
 
     _write_public(cert_path, cert.public_bytes(serialization.Encoding.PEM))
+    server_spki_pin = _server_spki_pin(private_key)
+    _write_public(pin_path, (server_spki_pin + "\n").encode())
 
     key_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -276,6 +245,8 @@ def _generate_cert(
     return {
         "cert_path": str(cert_path),
         "key_path": str(key_path),
+        "server_spki_pin_path": str(pin_path),
+        "server_spki_pin": server_spki_pin,
     }
 
 
@@ -315,15 +286,15 @@ class _RequestHandler(http.server.BaseHTTPRequestHandler):
                 return
             body: dict[str, Any] = parsed
 
-            missing = [f for f in ("hostname", "days", "certs_dir") if f not in body]
+            missing = [f for f in ("days", "certs_dir") if f not in body]
             if missing:
                 error_msg = f"Missing required fields: {', '.join(missing)}"
                 self._send_response(
                     400, "application/json", json.dumps({"error": error_msg}).encode()
                 )
                 return
-            if not isinstance(body["hostname"], str) or not isinstance(body["certs_dir"], str):
-                err = json.dumps({"error": "hostname and certs_dir must be strings"}).encode()
+            if not isinstance(body["certs_dir"], str):
+                err = json.dumps({"error": "certs_dir must be a string"}).encode()
                 self._send_response(400, "application/json", err)
                 return
             if not isinstance(body["days"], int):
@@ -332,7 +303,6 @@ class _RequestHandler(http.server.BaseHTTPRequestHandler):
                 return
 
             result = _generate_cert(
-                hostname=body["hostname"],
                 days=body["days"],
                 certs_dir=body["certs_dir"],
             )
