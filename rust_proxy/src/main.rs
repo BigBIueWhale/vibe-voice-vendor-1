@@ -1567,7 +1567,7 @@ mod tests {
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/transcribe")
-            .header(header::AUTHORIZATION, "obsolete")
+            .header(header::AUTHORIZATION, "forbidden")
             .body(body_that_counts_polls(body_polls.clone()))
             .expect("request");
 
@@ -1622,7 +1622,7 @@ mod tests {
             .write_all(
                 b"POST /v1/transcribe HTTP/1.1\r\n\
                   Host: example.test\r\n\
-                  Authorization: obsolete\r\n\
+                  Authorization: forbidden\r\n\
                   Expect: 100-continue\r\n\
                   Content-Length: 4\r\n\r\n",
             )

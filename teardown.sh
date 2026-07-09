@@ -6,11 +6,31 @@ PROXY_SERVICE="vibevoice-proxy"
 BACKEND_NETNS_CONTAINER="vibevoice-backend-netns"
 SERVER_CONTAINER="vibevoice-server-container"
 VLLM_CONTAINER="vibevoice-vllm"
+VLLM_REPOSITORY="vibevoice-vllm"
 VLLM_IMAGE="vibevoice-vllm:latest"
 
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 APP_CONFIG_DIR="$HOME/.config/vibevoice-vendor"
 BACKEND_SOCKET_DIR="/tmp/vibevoice-vendor-$(id -u)"
+
+remove_vibevoice_vllm_images() {
+    local image_ids=()
+    mapfile -t image_ids < <(
+        {
+            docker image ls --all --quiet "$VLLM_IMAGE" 2>/dev/null || true
+            docker image ls --all --quiet --filter "reference=${VLLM_REPOSITORY}:*" 2>/dev/null || true
+            docker image ls --all --quiet --filter "label=org.vvv.source-sha256" 2>/dev/null || true
+            docker image ls --all --quiet --filter "label=org.vvv.security-profile" 2>/dev/null || true
+        } | awk 'NF && !seen[$0]++'
+    )
+
+    if (( ${#image_ids[@]} == 0 )); then
+        return
+    fi
+
+    echo "Removing local VibeVoice Docker images..."
+    docker image rm --force "${image_ids[@]}"
+}
 
 echo "Stopping installed user services..."
 systemctl --user disable --now "$PROXY_SERVICE" 2>/dev/null || true
@@ -31,10 +51,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         fi
     done
 
-    if docker image inspect "$VLLM_IMAGE" >/dev/null 2>&1; then
-        echo "Removing Docker image $VLLM_IMAGE..."
-        docker image rm "$VLLM_IMAGE"
-    fi
+    remove_vibevoice_vllm_images
 else
     echo "Docker is unavailable; skipped Docker container and image removal."
 fi
@@ -47,4 +64,4 @@ rmdir "$APP_CONFIG_DIR/run" 2>/dev/null || true
 rm -f "$APP_CONFIG_DIR/groq.env"
 rmdir "$APP_CONFIG_DIR" 2>/dev/null || true
 
-echo "Teardown complete. Installed user services, runtime containers, runtime sockets, Groq env, and local VibeVoice Docker image were removed."
+echo "Teardown complete. Installed user services, runtime containers, runtime sockets, Groq env, and local VibeVoice Docker images were removed."

@@ -19,7 +19,7 @@ After exhaustive investigation, **your vendor wrapper implementation is faithful
 | Audio normalization | -25 dBFS | -25 dBFS | OK |
 | Audio encoder dtype | bfloat16 (from config) | bfloat16 (from config) | OK |
 | LM dtype | bfloat16 | bfloat16 | OK |
-| Speech tokens | `<\|object_ref_start\|>`, `<\|box_start\|>`, `<\|object_ref_end\|>` | Same fallback chain | OK |
+| Speech tokens | `<\|object_ref_start\|>`, `<\|box_start\|>`, `<\|object_ref_end\|>` | Same mapping behavior | OK |
 | Compress ratio | 3200 (from config) | 3200 (from config) | OK |
 | Streaming segments | 60s default | 60s default | OK |
 | vLLM version | v0.14.1 | v0.14.1 | OK |

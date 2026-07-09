@@ -250,4 +250,4 @@ systemctl --user restart vibevoice-proxy
 ./teardown.sh
 ```
 
-`teardown.sh` removes the installed user systemd units, runtime containers, runtime sockets, the Groq backend environment file, and the local `vibevoice-vllm:latest` Docker image. It does not delete the local client/server credential artifacts under `keys/` and `certs/`; rotate those explicitly when the trust material itself should change.
+`teardown.sh` removes the installed user systemd units, runtime containers, runtime sockets, the Groq backend environment file, and local VibeVoice Docker images, including `vibevoice-vllm:latest` and stale project-labelled builds. It does not delete the local client/server credential artifacts under `keys/` and `certs/`; rotate those explicitly when the trust material itself should change.

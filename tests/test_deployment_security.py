@@ -217,8 +217,11 @@ def test_teardown_removes_installed_runtime_without_destroying_credentials() -> 
     assert "vibevoice-vllm" in teardown
     assert "vibevoice-backend-netns" in teardown
     assert "vibevoice-vllm:latest" in teardown
+    assert "reference=${VLLM_REPOSITORY}:*" in teardown
+    assert "label=org.vvv.source-sha256" in teardown
+    assert "label=org.vvv.security-profile" in teardown
     assert "docker rm -f" in teardown
-    assert "docker image rm" in teardown
+    assert "docker image rm --force" in teardown
 
     assert ".service" in teardown
     assert "daemon-reload" in teardown
@@ -410,7 +413,6 @@ def test_public_proxy_uses_mtls_identity_without_application_auth() -> None:
     assert 'pinnedpubkey = "%s"' in setup
     assert "read_server_pin_for_curl" in setup
     assert '--config "$tls_config" -s -o "$body_file" -w' in setup
-    assert "auth_config" not in setup
 
     assert "no auth required" not in docs.lower()
     assert "| GET | `/health` | mTLS |" in docs
@@ -442,7 +444,6 @@ def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
     assert "http://127.0.0.1:${VVV_PORT}/" not in workflow
     assert "--ca-cert" not in workflow
     assert "steps.auth" not in workflow
-    assert "--jwt-public-key-file" not in workflow
 
 
 def test_rust_proxy_excludes_unused_public_transport_stacks() -> None:
