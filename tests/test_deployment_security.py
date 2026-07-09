@@ -253,6 +253,24 @@ def test_proxy_and_fastapi_backend_are_uds_only_by_construction() -> None:
     assert "http2=False" in app_source
 
 
+def test_public_proxy_is_ipv4_only_by_construction() -> None:
+    setup = _read("setup.sh")
+    proxy_source = _read("rust_proxy/src/main.rs")
+    docs = _read("README.md")
+
+    assert "--listen-host 0.0.0.0" in setup
+    assert "TcpSocket::new_v4()" in proxy_source
+    assert "TcpSocket::new_v6()" not in proxy_source
+    assert "public listener must be an IPv4 socket address" in proxy_source
+    assert "proxy_public_listener_rejects_ipv6" in proxy_source
+
+    assert "RestrictAddressFamilies=AF_INET AF_UNIX" in setup
+    assert "AF_INET6" not in setup
+
+    assert "IPv4-only by construction" in docs
+    assert "not `[::]`" in docs
+
+
 def test_public_proxy_requires_mtls_by_construction() -> None:
     setup = _read("setup.sh")
     proxy_source = _read("rust_proxy/src/main.rs")

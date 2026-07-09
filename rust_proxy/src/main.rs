@@ -289,11 +289,13 @@ fn current_tls_config(tls_config: &SharedTlsConfig) -> io::Result<Arc<rustls::Se
 }
 
 fn bind_public_listener(addr: SocketAddr) -> io::Result<std::net::TcpListener> {
-    let socket = if addr.is_ipv4() {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
+    if !addr.is_ipv4() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "public listener must be an IPv4 socket address",
+        ));
+    }
+    let socket = TcpSocket::new_v4()?;
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
     socket.listen(TCP_LISTEN_BACKLOG)?.into_std()
@@ -1716,6 +1718,13 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_ne!(addr.port(), 0);
+    }
+
+    #[test]
+    fn proxy_public_listener_rejects_ipv6() {
+        let err = bind_public_listener("[::1]:0".parse().expect("IPv6 socket address"))
+            .expect_err("IPv6 public listener rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[cfg(unix)]
