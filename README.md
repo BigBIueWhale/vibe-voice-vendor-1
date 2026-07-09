@@ -5,10 +5,10 @@ Secure, queue-based ASR server wrapping Microsoft's [VibeVoice-ASR-7B](https://g
 ## Architecture
 
 ```
-Internet (HTTPS :42862) -> vvv_proxy (self-signed TLS + mandatory mTLS + ES256 JWT gate) -> FastAPI (Unix socket) -> ASR backend
+Internet (HTTPS :42862) -> vvv_proxy (self-signed TLS 1.3 + mandatory mTLS + ES256 JWT gate) -> FastAPI (Unix socket) -> ASR backend
 ```
 
-The public proxy requires a valid client TLS certificate during the TLS handshake, then verifies the ES256 bearer token and revocation list before accepting the HTTP request as authenticated. A peer without the local client certificate cannot reach HTTP routing, JWT parsing, request-body reads, FastAPI, or vLLM. Public `/health` is proxy-local after mTLS and JWT authentication and does not touch FastAPI or vLLM.
+The public proxy accepts TLS 1.3 only. It requires a valid client TLS certificate during the TLS handshake, then verifies the ES256 bearer token and revocation list before accepting the HTTP request as authenticated. A peer without the local client certificate cannot reach HTTP routing, JWT parsing, request-body reads, FastAPI, or vLLM. Public `/health` is proxy-local after mTLS and JWT authentication and does not touch FastAPI or vLLM.
 
 FastAPI is reached by the Rust proxy over a private Unix domain socket in both supported setup modes; it does not bind a host TCP port. The proxy refuses symlinked or non-socket upstream paths, requires the socket directory to be `0700`, requires the socket itself to be `0600`, and verifies the connected Unix peer UID/GID before sending upstream HTTP bytes. With the local `vibevoice` backend, vLLM runs in a Docker network namespace created with `--network none`, FastAPI joins that namespace and talks to vLLM over namespace-local loopback (`127.0.0.1:8000` inside that namespace only), and the only host-facing backend path is the Unix socket consumed by the Rust proxy. The vLLM container does not get the socket mount, the JWT public key, or the revocation file.
 

@@ -505,10 +505,11 @@ fn build_tls_config(
         .build()
         .map_err(|e| format!("Failed to build mTLS client verifier: {e}"))?;
 
-    let mut config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
-        .with_single_cert(cert_chain, key)
-        .map_err(|e| format!("Failed to build TLS server config: {e}"))?;
+    let mut config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(cert_chain, key)
+            .map_err(|e| format!("Failed to build TLS 1.3-only server config: {e}"))?;
     config.alpn_protocols = vec![TLS_ALPN_HTTP1.to_vec()];
     Ok(config)
 }
@@ -1651,7 +1652,7 @@ gtqOUBjrEaX62UGoppp76hGVsRevQ7i5niX-PZK1oghIZdcp9yIasw7hN3xaTMhTOyNktiGdY-bh3W67
     }
 
     #[test]
-    fn tls_config_requires_client_ca_and_http1_only_alpn() {
+    fn tls_config_requires_client_ca_tls13_and_http1_only_alpn() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let unique = format!(
             "vvv-proxy-mtls-test-{}-{}",
