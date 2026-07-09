@@ -1,4 +1,4 @@
-"""Mock vLLM server that returns a fixed transcription for E2E testing."""
+"""Mock vLLM server that returns fixed VibeVoice JSON segments for E2E testing."""
 
 import argparse
 import asyncio
@@ -11,7 +11,10 @@ from fastapi.responses import StreamingResponse
 
 app = FastAPI()
 
-MOCK_TRANSCRIPTION = "Hello, this is a test of the VibeVoice transcription system."
+MOCK_TRANSCRIPTION = (
+    '[{"Start":0,"End":1,"Content":"Hello, this is a test of the '
+    'VibeVoice transcription system."}]'
+)
 
 
 @app.get("/health")
@@ -21,18 +24,21 @@ async def health() -> dict[str, str]:
 
 @app.post("/v1/chat/completions")
 async def chat_completions() -> StreamingResponse:
-    words = MOCK_TRANSCRIPTION.split(" ")
+    chunks = [
+        MOCK_TRANSCRIPTION[:26],
+        MOCK_TRANSCRIPTION[26:52],
+        MOCK_TRANSCRIPTION[52:],
+    ]
 
     async def generate() -> AsyncIterator[str]:
-        for i, word in enumerate(words):
-            prefix = "" if i == 0 else " "
+        for i, text in enumerate(chunks):
             chunk = {
                 "id": f"chatcmpl-{i}",
                 "object": "chat.completion.chunk",
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": f"{prefix}{word}"},
+                        "delta": {"content": text},
                         "finish_reason": None,
                     }
                 ],

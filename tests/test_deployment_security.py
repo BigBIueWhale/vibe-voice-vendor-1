@@ -370,6 +370,31 @@ def test_public_proxy_has_no_tokenless_http_routes() -> None:
     assert "| GET | `/health` | Yes |" in docs
 
 
+def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
+    workflow = _read(".github/workflows/e2e.yml")
+
+    assert "--uds" in workflow
+    assert "--require-https true" in workflow
+    assert "--require-https false" not in workflow
+    assert "--upstream-uds" in workflow
+    assert "--upstream-peer-uid" in workflow
+    assert "--upstream-peer-gid" in workflow
+    assert "--listen-host 127.0.0.1" in workflow
+
+    assert "--server-pin" in workflow
+    assert "--client-cert" in workflow
+    assert "--client-key" in workflow
+    assert "--pinnedpubkey" in workflow
+    assert "--tlsv1.3 --tls-max 1.3" in workflow
+    assert "Test: no client certificate is rejected at TLS" in workflow
+    assert "Test: wrong server public key pin is rejected client-side" in workflow
+    assert "Test: backend UDS rejects direct protected non-HTTPS request" in workflow
+
+    assert '--server "http://127.0.0.1:${VVV_PORT}"' not in workflow
+    assert "http://127.0.0.1:${VVV_PORT}/" not in workflow
+    assert "--ca-cert" not in workflow
+
+
 def test_rust_proxy_excludes_unused_public_transport_stacks() -> None:
     cargo_toml = _read("rust_proxy/Cargo.toml")
     cargo_lock = _read("rust_proxy/Cargo.lock")

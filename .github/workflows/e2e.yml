@@ -21,19 +21,32 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install dependencies
         run: uv sync
 
+      - name: Build Rust proxy
+        run: cargo build --manifest-path rust_proxy/Cargo.toml
+
       - name: Generate auth key pair and token
         id: auth
         run: |
-          OUTPUT=$(uv run python -m scripts.generate_token --keys-dir "${{ runner.temp }}/keys" --subject ci-test)
+          OUTPUT=$(uv run python -m scripts.generate_token --keys-dir "${{ runner.temp }}/keys" --subject ci-test --print-token)
           TOKEN=$(echo "$OUTPUT" | grep 'Token:' | sed 's/.*Token:[[:space:]]*//')
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
           echo "public_key=${{ runner.temp }}/keys/public.pem" >> "$GITHUB_OUTPUT"
+
+      - name: Generate mTLS client certificate
+        run: |
+          uv run python -m scripts.generate_client_cert \
+            --certs-dir "${{ runner.temp }}/certs" \
+            --keys-dir "${{ runner.temp }}/keys" \
+            --subject ci-client
 
       - name: Create empty revoked tokens file
         run: touch "${{ runner.temp }}/revoked_tokens.txt"
@@ -46,18 +59,36 @@ jobs:
 
       - name: Start VVV server
         run: |
+          VVV_UDS="${{ runner.temp }}/vvv-runtime/server.sock"
           uv run python -m server \
+            --uds "$VVV_UDS" \
             --vllm-base-url "http://127.0.0.1:${{ env.MOCK_VLLM_PORT }}" \
-            --host 127.0.0.1 \
-            --port ${{ env.VVV_PORT }} \
             --max-audio-bytes 524288000 \
             --max-queue-size 50 \
             --jwt-public-key-file "${{ steps.auth.outputs.public_key }}" \
             --revoked-tokens-file "${{ runner.temp }}/revoked_tokens.txt" \
-            --require-https false \
+            --require-https true \
             --vllm-model-name vibevoice \
             --vllm-temperature 0.0 \
             --vllm-top-p 1.0 &
+
+      - name: Start TLS proxy
+        run: |
+          cargo run --quiet --manifest-path rust_proxy/Cargo.toml -- \
+            --upstream-uds "${{ runner.temp }}/vvv-runtime/server.sock" \
+            --upstream-peer-uid "$(id -u)" \
+            --upstream-peer-gid "$(id -g)" \
+            --listen-host 127.0.0.1 \
+            --listen-port ${{ env.VVV_PORT }} \
+            --max-body-size 524288000 \
+            --jwt-public-key-file "${{ steps.auth.outputs.public_key }}" \
+            --revoked-tokens-file "${{ runner.temp }}/revoked_tokens.txt" \
+            --cert-path "${{ runner.temp }}/certs/fullchain.pem" \
+            --key-path "${{ runner.temp }}/certs/privkey.pem" \
+            --server-spki-pin-path "${{ runner.temp }}/certs/server-spki-pin.txt" \
+            --client-ca-cert-path "${{ runner.temp }}/certs/client-ca.pem" \
+            --cert-validity-days 30 \
+            --cert-check-interval-secs 3600 &
 
       - name: Wait for servers
         run: |
@@ -68,72 +99,166 @@ jobs:
           curl -sf "http://127.0.0.1:${MOCK_VLLM_PORT}/health" > /dev/null || { echo "Mock vLLM failed to start"; exit 1; }
 
           for i in $(seq 1 30); do
-            curl -sf "http://127.0.0.1:${VVV_PORT}/health" > /dev/null 2>&1 && break
+            test -S "${{ runner.temp }}/vvv-runtime/server.sock" && break
             sleep 1
           done
-          curl -sf "http://127.0.0.1:${VVV_PORT}/health" > /dev/null || { echo "VVV server failed to start"; exit 1; }
+          test -S "${{ runner.temp }}/vvv-runtime/server.sock" || { echo "VVV UDS server failed to start"; exit 1; }
 
-      - name: "Test: health endpoint reports vLLM ok"
+          for i in $(seq 1 30); do
+            if [ -s "${{ runner.temp }}/certs/server-spki-pin.txt" ]; then
+              PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+              CURL_PIN="sha256//${PIN#sha256/}"
+              curl -skf \
+                --tlsv1.3 --tls-max 1.3 \
+                --pinnedpubkey "$CURL_PIN" \
+                --cert "${{ runner.temp }}/keys/client-cert.pem" \
+                --key "${{ runner.temp }}/keys/client-key.pem" \
+                -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+                "https://127.0.0.1:${VVV_PORT}/health" > /dev/null 2>&1 && break
+            fi
+            sleep 1
+          done
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
+          curl -skf \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://127.0.0.1:${VVV_PORT}/health" > /dev/null || { echo "TLS proxy failed to start"; exit 1; }
+
+      - name: "Test: authenticated proxy health"
         run: |
-          HEALTH=$(curl -sf "http://127.0.0.1:${VVV_PORT}/health")
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
+          HEALTH=$(curl -skf \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://127.0.0.1:${VVV_PORT}/health")
           echo "$HEALTH"
           STATUS=$(echo "$HEALTH" | jq -r '.status')
-          VLLM=$(echo "$HEALTH" | jq -r '.vllm')
+          PROXY=$(echo "$HEALTH" | jq -r '.proxy')
           [ "$STATUS" = "ok" ] || { echo "FAIL: status=$STATUS"; exit 1; }
-          [ "$VLLM" = "ok" ] || { echo "FAIL: vllm=$VLLM"; exit 1; }
+          [ "$PROXY" = "ok" ] || { echo "FAIL: proxy=$PROXY"; exit 1; }
+
+      - name: "Test: no client certificate is rejected at TLS"
+        run: |
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
+          CODE=$(curl -sk \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --max-time 5 \
+            -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://127.0.0.1:${VVV_PORT}/health" || true)
+          [ "$CODE" = "000" ] || { echo "FAIL: expected TLS failure, got HTTP $CODE"; exit 1; }
+
+      - name: "Test: wrong server public key pin is rejected client-side"
+        run: |
+          WRONG_PIN="sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          CODE=$(curl -sk \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$WRONG_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
+            --max-time 5 \
+            -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "https://127.0.0.1:${VVV_PORT}/health" || true)
+          [ "$CODE" = "000" ] || { echo "FAIL: expected pin failure, got HTTP $CODE"; exit 1; }
 
       - name: "Test: transcribe audio via CLI"
         run: |
+          SERVER_PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
           OUTPUT=$(uv run vvv \
-            --server "http://127.0.0.1:${VVV_PORT}" \
+            --server "https://127.0.0.1:${VVV_PORT}" \
             --token "${{ steps.auth.outputs.token }}" \
+            --server-pin "$SERVER_PIN" \
+            --client-cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --client-key "${{ runner.temp }}/keys/client-key.pem" \
             transcribe test_audio.flac)
           echo "Output: $OUTPUT"
-          EXPECTED="Hello, this is a test of the VibeVoice transcription system."
+          EXPECTED='[{"Start":0,"End":1,"Content":"Hello, this is a test of the VibeVoice transcription system."}]'
           [ "$OUTPUT" = "$EXPECTED" ] || { echo "FAIL: expected '$EXPECTED', got '$OUTPUT'"; exit 1; }
 
       - name: "Test: transcribe with hotwords"
         run: |
+          SERVER_PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
           OUTPUT=$(uv run vvv \
-            --server "http://127.0.0.1:${VVV_PORT}" \
+            --server "https://127.0.0.1:${VVV_PORT}" \
             --token "${{ steps.auth.outputs.token }}" \
+            --server-pin "$SERVER_PIN" \
+            --client-cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --client-key "${{ runner.temp }}/keys/client-key.pem" \
             transcribe test_audio.flac --hotwords "VibeVoice,ASR")
           echo "Output: $OUTPUT"
-          echo "$OUTPUT" | grep -q "VibeVoice" || { echo "FAIL: missing transcription text"; exit 1; }
+          echo "$OUTPUT" | grep -q '"Content":"Hello' || { echo "FAIL: missing transcription text"; exit 1; }
 
       - name: "Test: transcribe with --output writes file"
         run: |
+          SERVER_PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
           uv run vvv \
-            --server "http://127.0.0.1:${VVV_PORT}" \
+            --server "https://127.0.0.1:${VVV_PORT}" \
             --token "${{ steps.auth.outputs.token }}" \
+            --server-pin "$SERVER_PIN" \
+            --client-cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --client-key "${{ runner.temp }}/keys/client-key.pem" \
             transcribe test_audio.flac --output transcript.txt
           [ -f transcript.txt ] || { echo "FAIL: output file not created"; exit 1; }
           grep -q "Hello" transcript.txt || { echo "FAIL: output file missing text"; exit 1; }
 
       - name: "Test: queue status with valid token"
         run: |
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
           STATUS=$(curl -sf \
+            --insecure \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
             -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
-            "http://127.0.0.1:${VVV_PORT}/v1/queue/status")
+            "https://127.0.0.1:${VVV_PORT}/v1/queue/status")
           echo "$STATUS"
           TOTAL=$(echo "$STATUS" | jq -r '.total_queued')
           [ "$TOTAL" = "0" ] || { echo "FAIL: expected 0 queued, got $TOTAL"; exit 1; }
 
       - name: "Test: bad token rejected"
         run: |
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
           CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            --insecure \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
             -H "Authorization: Bearer wrong-token" \
-            "http://127.0.0.1:${VVV_PORT}/v1/queue/status")
+            "https://127.0.0.1:${VVV_PORT}/v1/queue/status")
           [ "$CODE" = "401" ] || { echo "FAIL: expected 401, got $CODE"; exit 1; }
 
       - name: "Test: missing token rejected"
         run: |
+          PIN=$(cat "${{ runner.temp }}/certs/server-spki-pin.txt")
+          CURL_PIN="sha256//${PIN#sha256/}"
           CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            "http://127.0.0.1:${VVV_PORT}/v1/queue/status")
-          [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || { echo "FAIL: expected 401 or 403, got $CODE"; exit 1; }
+            --insecure \
+            --tlsv1.3 --tls-max 1.3 \
+            --pinnedpubkey "$CURL_PIN" \
+            --cert "${{ runner.temp }}/keys/client-cert.pem" \
+            --key "${{ runner.temp }}/keys/client-key.pem" \
+            "https://127.0.0.1:${VVV_PORT}/v1/queue/status")
+          [ "$CODE" = "401" ] || { echo "FAIL: expected 401, got $CODE"; exit 1; }
 
-      - name: "Test: health requires no auth"
+      - name: "Test: backend UDS rejects direct protected non-HTTPS request"
         run: |
           CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            "http://127.0.0.1:${VVV_PORT}/health")
-          [ "$CODE" = "200" ] || { echo "FAIL: expected 200, got $CODE"; exit 1; }
+            --unix-socket "${{ runner.temp }}/vvv-runtime/server.sock" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            "http://vvv-upstream/v1/queue/status")
+          [ "$CODE" = "403" ] || { echo "FAIL: expected 403, got $CODE"; exit 1; }
