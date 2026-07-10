@@ -544,6 +544,11 @@ LockPersonality=true
 RestrictNamespaces=true
 RestrictRealtime=true
 SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
 LimitNOFILE=512
 TasksMax=256
 
@@ -583,6 +588,11 @@ LockPersonality=true
 RestrictNamespaces=true
 RestrictRealtime=true
 SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
 LimitNOFILE=512
 TasksMax=256
 

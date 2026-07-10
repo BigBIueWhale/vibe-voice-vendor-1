@@ -428,6 +428,23 @@ def test_user_units_do_not_use_mount_namespace_sandboxing() -> None:
         assert directive not in setup
 
 
+def test_public_proxy_user_unit_has_verified_non_mount_sandboxing() -> None:
+    setup = _read("setup.sh")
+
+    # These directives were verified against a transient proxy instance using
+    # the real backend UDS. They reduce host-process blast radius without moving
+    # the proxy into a mount namespace that breaks Docker's socket permissions.
+    required = [
+        "MemoryDenyWriteExecute=true",
+        "ProtectProc=invisible",
+        "ProcSubset=pid",
+        "SystemCallFilter=@system-service @network-io",
+        "SystemCallErrorNumber=EPERM",
+    ]
+    for directive in required:
+        assert setup.count(directive) == 2
+
+
 def test_public_proxy_uses_mtls_identity_without_application_auth() -> None:
     setup = _read("setup.sh")
     proxy_source = _read("rust_proxy/src/main.rs")
