@@ -88,6 +88,20 @@ async def test_worker_clears_audio_after_processing(
     await queue.stop()
 
 
+def test_discard_audio_removes_private_upload_dir(tmp_path: Path) -> None:
+    upload_dir = tmp_path / "vvv-upload-test"
+    upload_dir.mkdir()
+    audio_path = upload_dir / "audio.audio"
+    audio_path.write_text("big_audio_data")
+    job = TranscriptionJob(audio_path=str(audio_path))
+
+    job.discard_audio()
+
+    assert job.audio_path is None
+    assert not audio_path.exists()
+    assert not upload_dir.exists()
+
+
 async def test_eta_estimation(queue: TranscriptionQueue) -> None:
     # With no history, default is 30s per job
     job = TranscriptionJob(client_identity="user1111")

@@ -1,5 +1,8 @@
 import asyncio
+import io
+import shutil
 import struct
+import tempfile
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,11 +20,13 @@ from starlette.types import Message, Receive, Scope, Send
 
 import server.routes.transcribe as transcribe_route
 from server.app import RequireHTTPSMiddleware, create_app
+from server.audio import probe_duration_file
 from server.config import Settings
 from server.queue import TranscriptionJob, TranscriptionQueue
 
 TEST_CLIENT_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 CLIENT_IDENTITY_HEADERS = {"x-vvv-client-spki-sha256": TEST_CLIENT_IDENTITY}
+has_ffprobe = shutil.which("ffprobe") is not None
 
 
 def _iter_original_routes(routes: Iterable[Any]) -> Iterator[Any]:
@@ -329,6 +334,54 @@ async def test_transcribe_spool_storage_error_releases_reserved_upload_slot(
     assert calls == 2
 
 
+async def test_spool_upload_uses_private_temp_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    upload = UploadFile(io.BytesIO(b"audio bytes"), filename="clip.wav")
+
+    audio_path, size = await transcribe_route._spool_upload(upload, max_audio_bytes=1024)
+    path = Path(audio_path)
+    try:
+        assert size == len(b"audio bytes")
+        assert path.name == "audio.audio"
+        assert path.parent.parent == tmp_path
+        assert path.parent.name.startswith("vvv-upload-")
+        assert path.read_bytes() == b"audio bytes"
+    finally:
+        TranscriptionJob(audio_path=audio_path).discard_audio()
+
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+@pytest.mark.skipif(not has_ffprobe, reason="ffprobe not installed")
+async def test_concat_upload_cannot_reference_shared_temp_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    shared_audio = tmp_path / "meeting.wav"
+    shared_audio.write_bytes(_make_wav(sample_rate=8000, num_samples=8000))
+
+    concat_playlist = b"ffconcat version 1.0\nfile meeting.wav\nduration 1.0\n"
+    upload = UploadFile(io.BytesIO(concat_playlist), filename="attack.wav")
+    audio_path, _ = await transcribe_route._spool_upload(upload, max_audio_bytes=1024)
+    path = Path(audio_path)
+    try:
+        assert path.parent != tmp_path
+        assert not (path.parent / "meeting.wav").exists()
+        with pytest.raises(RuntimeError, match="ffprobe failed"):
+            await probe_duration_file(audio_path)
+    finally:
+        TranscriptionJob(audio_path=audio_path).discard_audio()
+
+    assert shared_audio.exists()
+
+
 async def test_transcribe_malformed_multipart_parser_error_is_400(
     tmp_path: Path,
 ) -> None:
@@ -336,11 +389,7 @@ async def test_transcribe_malformed_multipart_parser_error_is_400(
     boundary = "vvvboundary"
     oversized_header_name = "x" * (5 * 1024)
     body = (
-        f"--{boundary}\r\n"
-        f"{oversized_header_name}: y\r\n"
-        "\r\n"
-        "payload\r\n"
-        f"--{boundary}--\r\n"
+        f"--{boundary}\r\n{oversized_header_name}: y\r\n\r\npayload\r\n--{boundary}--\r\n"
     ).encode()
 
     async with _lifespan_client(s) as client:

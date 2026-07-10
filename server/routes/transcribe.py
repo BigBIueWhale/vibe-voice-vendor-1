@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Annotated
@@ -25,12 +26,16 @@ _MAX_FORM_FIELD_BYTES = 16 * 1024
 _MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 _REQUEST_BODY_CHUNK_TIMEOUT_SECONDS = 180.0
 _CONTROL_TOKEN_RE = re.compile(r"<\|[^>\r\n]{1,128}\|>")
+_UPLOAD_DIR_PREFIX = "vvv-upload-"
+_UPLOAD_FILE_NAME = "audio.audio"
 
 
 async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, int]:
-    fd, path = tempfile.mkstemp(prefix="vvv-upload-", suffix=".audio")
+    upload_dir = tempfile.mkdtemp(prefix=_UPLOAD_DIR_PREFIX)
+    path = os.path.join(upload_dir, _UPLOAD_FILE_NAME)
     total = 0
     try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as out:
             while True:
                 chunk = await upload.read(_UPLOAD_CHUNK_BYTES)
@@ -44,8 +49,7 @@ async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, 
             raise HTTPException(status_code=400, detail="Empty audio file")
         return path, total
     except Exception:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(path)
+        shutil.rmtree(upload_dir, ignore_errors=True)
         raise
 
 

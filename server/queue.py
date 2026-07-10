@@ -9,11 +9,14 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from server.models import JobInfo, JobStatus, QueueStatusResponse
 
 logger = logging.getLogger(__name__)
+_UPLOAD_DIR_PREFIX = "vvv-upload-"
+_UPLOAD_FILE_NAME = "audio.audio"
 
 
 @dataclass
@@ -45,6 +48,12 @@ class TranscriptionJob:
         self.audio_path = None
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
+        upload_path = Path(path)
+        if upload_path.name == _UPLOAD_FILE_NAME and upload_path.parent.name.startswith(
+            _UPLOAD_DIR_PREFIX
+        ):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                upload_path.parent.rmdir()
 
 
 class TranscriptionQueue:
