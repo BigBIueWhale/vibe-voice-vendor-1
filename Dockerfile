@@ -419,6 +419,69 @@ for name in sorted(runtime_names):
 Path("/tmp/vvv-requirements.txt").write_text("\n".join(lines) + "\n")
 PY
 
+RUN set -eux; \
+    apt-get purge -y \
+        curl \
+        dirmngr \
+        git \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gnupg || true; \
+    rm -f \
+        /bin/apt \
+        /bin/apt-add-repository \
+        /bin/apt-cache \
+        /bin/apt-cdrom \
+        /bin/apt-config \
+        /bin/apt-get \
+        /bin/apt-key \
+        /bin/apt-mark \
+        /usr/bin/apt \
+        /usr/bin/apt-add-repository \
+        /usr/bin/apt-cache \
+        /usr/bin/apt-cdrom \
+        /usr/bin/apt-config \
+        /usr/bin/apt-get \
+        /usr/bin/apt-key \
+        /usr/bin/apt-mark \
+        /usr/bin/dirmngr* \
+        /usr/bin/gpg* \
+        /usr/bin/pip \
+        /usr/bin/pip3 \
+        /usr/bin/pip3.* \
+        /usr/local/bin/ninja \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.* \
+        /opt/vvv-server-venv/bin/pip \
+        /opt/vvv-server-venv/bin/pip3 \
+        /opt/vvv-server-venv/bin/pip3.*; \
+    rm -rf \
+        /root/.cache/pip \
+        /usr/lib/python*/dist-packages/pip \
+        /usr/lib/python*/dist-packages/pip-* \
+        /usr/local/lib/python*/dist-packages/pip \
+        /usr/local/lib/python*/dist-packages/pip-* \
+        /opt/vvv-server-venv/lib/python*/site-packages/pip \
+        /opt/vvv-server-venv/lib/python*/site-packages/pip-* \
+        /var/lib/apt/lists/*; \
+    hash -r; \
+    for banned in git curl cmake ninja gpg gpgv dirmngr pip pip3 apt apt-get; do \
+        if command -v "$banned" >/dev/null 2>&1; then \
+            echo "ERROR: final image unexpectedly contains $banned" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    command -v cc >/dev/null; \
+    command -v gcc >/dev/null; \
+    command -v ld >/dev/null; \
+    test "$(command -v ffmpeg)" = "/opt/vvv-ffmpeg/bin/ffmpeg"; \
+    test "$(command -v ffprobe)" = "/opt/vvv-ffmpeg/bin/ffprobe"; \
+    python3 -c "import vllm; import vllm_plugin; import librosa; import scipy.signal; import soundfile"; \
+    PYTHONPATH=/opt/vvv-server /opt/vvv-server-venv/bin/python -c "import server.app"
+
 ENV VIBEVOICE_FFMPEG_MAX_CONCURRENCY=1
 ENV VIBEVOICE_FFMPEG_THREADS=1
 ENV VIBEVOICE_FFMPEG_TIMEOUT_SECONDS=900

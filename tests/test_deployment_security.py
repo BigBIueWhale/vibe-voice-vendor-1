@@ -657,9 +657,55 @@ def test_runtime_image_uses_pinned_minimal_ffmpeg_not_distro_package() -> None:
 
     assert "minimal FFmpeg build unexpectedly enables" in dockerfile
     assert "minimal FFmpeg decode smoke test returned" in dockerfile
-    assert "minimal-pinned-ffmpeg-audio-surface-v5" in setup
+    assert "minimal-pinned-ffmpeg-no-package-tools-v8" in setup
     assert "official FFmpeg `8.1.2`" in docs
     assert "Ubuntu's broad `ffmpeg` package" in docs
+
+
+def test_runtime_image_removes_download_and_package_tools_but_keeps_required_compiler() -> None:
+    dockerfile = _read("Dockerfile")
+
+    assert "apt-get purge -y \\" in dockerfile
+    assert "apt-get purge -y --auto-remove" not in dockerfile
+    for package in [
+        "cmake",
+        "curl",
+        "dirmngr",
+        "git",
+        "gpg",
+        "gpg-agent",
+        "gpgconf",
+        "gpgsm",
+        "gnupg",
+    ]:
+        assert package in dockerfile
+
+    for path in [
+        "/bin/apt",
+        "/bin/apt-get",
+        "/usr/bin/apt",
+        "/usr/bin/apt-get",
+        "/usr/bin/dirmngr*",
+        "/usr/bin/gpg*",
+        "/usr/bin/pip",
+        "/usr/bin/pip3",
+        "/usr/local/bin/ninja",
+        "/usr/local/bin/pip",
+        "/usr/local/bin/pip3",
+        "/opt/vvv-server-venv/bin/pip",
+        "/opt/vvv-server-venv/bin/pip3",
+    ]:
+        assert path in dockerfile
+
+    assert "hash -r; \\" in dockerfile
+    assert "for banned in git curl cmake ninja gpg gpgv dirmngr pip pip3 apt apt-get; do" in dockerfile
+    assert 'command -v "$banned"' in dockerfile
+    assert "ERROR: final image unexpectedly contains $banned" in dockerfile
+    assert "command -v cc >/dev/null" in dockerfile
+    assert "command -v gcc >/dev/null" in dockerfile
+    assert "command -v ld >/dev/null" in dockerfile
+    assert 'python3 -c "import vllm; import vllm_plugin; import librosa; import scipy.signal; import soundfile"' in dockerfile
+    assert 'PYTHONPATH=/opt/vvv-server /opt/vvv-server-venv/bin/python -c "import server.app"' in dockerfile
 
 
 def test_vibevoice_ffmpeg_decode_is_bounded_in_runtime_image() -> None:
