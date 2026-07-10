@@ -12,6 +12,7 @@ VLLM_IMAGE="vibevoice-vllm:latest"
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 APP_CONFIG_DIR="$HOME/.config/vibevoice-vendor"
 BACKEND_SOCKET_DIR="/tmp/vibevoice-vendor-$(id -u)"
+BACKEND_TMP_DIR="$BACKEND_SOCKET_DIR/tmp"
 
 remove_vibevoice_vllm_images() {
     local image_ids=()
@@ -58,6 +59,9 @@ fi
 
 echo "Removing runtime sockets and backend configuration..."
 rm -f "$BACKEND_SOCKET_DIR/server.sock"
+if [[ "$BACKEND_TMP_DIR" == /tmp/vibevoice-vendor-$(id -u)/tmp && -d "$BACKEND_TMP_DIR" && ! -L "$BACKEND_TMP_DIR" ]]; then
+    rm -rf -- "$BACKEND_TMP_DIR"
+fi
 rmdir "$BACKEND_SOCKET_DIR" 2>/dev/null || true
 rm -f "$APP_CONFIG_DIR/run/server.sock"
 rmdir "$APP_CONFIG_DIR/run" 2>/dev/null || true

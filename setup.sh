@@ -16,6 +16,8 @@ MAX_AUDIO_BYTES=524288000
 MAX_MULTIPART_OVERHEAD_BYTES=1048576
 MAX_REQUEST_BYTES=$((MAX_AUDIO_BYTES + MAX_MULTIPART_OVERHEAD_BYTES))
 MAX_QUEUE_SIZE=50
+UPLOAD_STORAGE_HEADROOM_BYTES=1073741824
+REQUIRED_UPLOAD_STORAGE_BYTES=$((MAX_QUEUE_SIZE * MAX_REQUEST_BYTES * 2 + UPLOAD_STORAGE_HEADROOM_BYTES))
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$SCRIPT_DIR"
@@ -27,6 +29,8 @@ HOST_GID="$(id -g)"
 BACKEND_SOCKET_DIR="/tmp/vibevoice-vendor-$HOST_UID"
 BACKEND_SOCKET_HOST="$BACKEND_SOCKET_DIR/server.sock"
 BACKEND_SOCKET_CONTAINER="/run/vibevoice/server.sock"
+BACKEND_TMP_HOST="$BACKEND_SOCKET_DIR/tmp"
+BACKEND_TMP_CONTAINER="/run/vibevoice/tmp"
 CERT_DIR="$INSTALL_DIR/certs/self-signed"
 SERVER_SPKI_PIN="$CERT_DIR/server-spki-pin.txt"
 CLIENT_CA_CERT="$CERT_DIR/client-ca.pem"
@@ -124,6 +128,7 @@ validate_environment() {
     validate_simple_systemd_path "$INSTALL_DIR"
     validate_simple_systemd_path "$APP_CONFIG_DIR"
     validate_simple_systemd_path "$BACKEND_SOCKET_HOST"
+    validate_simple_systemd_path "$BACKEND_TMP_HOST"
 
     if [[ "$BACKEND" == "vibevoice" ]]; then
         for cmd in docker uv cargo git curl ffprobe; do
@@ -135,6 +140,17 @@ validate_environment() {
         done
         validate_env_value "GROQ_API_KEY" "$GROQ_API_KEY"
         validate_env_value "GROQ_MODEL_NAME" "$GROQ_MODEL_NAME"
+    fi
+}
+
+check_upload_storage_capacity() {
+    local available
+    available="$(df -PB1 "$BACKEND_TMP_HOST" | awk 'NR == 2 {print $4}')"
+    [[ "$available" =~ ^[0-9]+$ ]] \
+        || die "Could not determine free bytes for upload temp directory $BACKEND_TMP_HOST"
+
+    if (( available < REQUIRED_UPLOAD_STORAGE_BYTES )); then
+        die "Upload temp storage under $BACKEND_TMP_HOST has $available bytes free; need at least $REQUIRED_UPLOAD_STORAGE_BYTES bytes for MAX_QUEUE_SIZE=$MAX_QUEUE_SIZE and MAX_AUDIO_BYTES=$MAX_AUDIO_BYTES"
     fi
 }
 
@@ -284,6 +300,9 @@ ensure_private_dir() {
 prepare_backend_socket_dir() {
     ensure_private_dir "$APP_CONFIG_DIR"
     ensure_private_dir "$BACKEND_SOCKET_DIR"
+    ensure_private_dir "$BACKEND_TMP_HOST"
+    find "$BACKEND_TMP_HOST" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    check_upload_storage_capacity
     rm -f "$BACKEND_SOCKET_HOST"
 }
 
@@ -365,6 +384,9 @@ build_and_start_vibevoice_backend() {
         -e USER=vvv-server \
         -e LOGNAME=vvv-server \
         -e XDG_CACHE_HOME=/tmp/vvv-server-cache \
+        -e TMPDIR="$BACKEND_TMP_CONTAINER" \
+        -e TMP="$BACKEND_TMP_CONTAINER" \
+        -e TEMP="$BACKEND_TMP_CONTAINER" \
         -e PYTHONDONTWRITEBYTECODE=1 \
         -e PYTHONPATH=/opt/vvv-server \
         -v "$BACKEND_SOCKET_DIR:/run/vibevoice" \
@@ -458,6 +480,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$APP_CONFIG_DIR/groq.env
+Environment=TMPDIR=$BACKEND_TMP_HOST
+Environment=TMP=$BACKEND_TMP_HOST
+Environment=TEMP=$BACKEND_TMP_HOST
 ExecStart=$INSTALL_DIR/.venv/bin/python -m server \\
     --asr-backend groq \\
     --groq-api-key \${GROQ_API_KEY} \\

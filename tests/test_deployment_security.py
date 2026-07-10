@@ -115,6 +115,7 @@ def test_all_docker_runs_fail_closed_and_do_not_join_host_namespaces() -> None:
         '--name "$SERVER_CONTAINER"' in command
         and '--network "container:$BACKEND_NETNS_CONTAINER"' in command
         and '-v "$BACKEND_SOCKET_DIR:/run/vibevoice"' in command
+        and '-e TMPDIR="$BACKEND_TMP_CONTAINER"' in command
         for command in commands
     )
 
@@ -128,6 +129,7 @@ def test_local_backend_host_access_is_only_the_private_uds_mount() -> None:
     assert "ensure_private_dir" in setup
     assert 'ensure_private_dir "$APP_CONFIG_DIR"' in setup
     assert 'ensure_private_dir "$BACKEND_SOCKET_DIR"' in setup
+    assert 'ensure_private_dir "$BACKEND_TMP_HOST"' in setup
     assert 'stat -c \'%u:%g\' "$dir"' in setup
     assert 'stat -c \'%a\' "$dir"' in setup
     assert "backend_socket_is_private" in setup
@@ -147,6 +149,35 @@ def test_local_backend_host_access_is_only_the_private_uds_mount() -> None:
     ]
     for value in forbidden_mounts:
         assert value not in setup
+
+
+def test_upload_temp_storage_matches_configured_queue_capacity() -> None:
+    setup = _read("setup.sh")
+    teardown = _read("teardown.sh")
+    docs = _read("README.md")
+
+    assert "BACKEND_TMP_HOST=\"$BACKEND_SOCKET_DIR/tmp\"" in setup
+    assert "BACKEND_TMP_CONTAINER=\"/run/vibevoice/tmp\"" in setup
+    required_storage = (
+        "REQUIRED_UPLOAD_STORAGE_BYTES="
+        "$((MAX_QUEUE_SIZE * MAX_REQUEST_BYTES * 2 + UPLOAD_STORAGE_HEADROOM_BYTES))"
+    )
+    assert required_storage in setup
+    assert "check_upload_storage_capacity" in setup
+    assert 'df -PB1 "$BACKEND_TMP_HOST"' in setup
+    assert "Upload temp storage under $BACKEND_TMP_HOST" in setup
+    tmp_cleanup = 'find "$BACKEND_TMP_HOST" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
+    assert tmp_cleanup in setup
+
+    assert '-e TMPDIR="$BACKEND_TMP_CONTAINER"' in setup
+    assert '-e TMP="$BACKEND_TMP_CONTAINER"' in setup
+    assert '-e TEMP="$BACKEND_TMP_CONTAINER"' in setup
+    assert "Environment=TMPDIR=$BACKEND_TMP_HOST" in setup
+    assert "Environment=TMP=$BACKEND_TMP_HOST" in setup
+    assert "Environment=TEMP=$BACKEND_TMP_HOST" in setup
+
+    assert 'rm -rf -- "$BACKEND_TMP_DIR"' in teardown
+    assert "/tmp/vibevoice-vendor-UID/tmp" in docs
 
 
 def test_vllm_runtime_has_no_local_media_path_and_loopback_only_bind() -> None:
