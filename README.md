@@ -12,11 +12,11 @@ The public proxy accepts TLS 1.3 only. Its certificate is a self-owned server id
 
 FastAPI is reached by the Rust proxy over a private Unix domain socket in both supported setup modes; it does not bind a host TCP port. The proxy refuses symlinked or non-socket upstream paths, requires the socket directory to be `0700`, requires the socket itself to be `0600`, and verifies the connected Unix peer UID/GID before sending upstream HTTP bytes. With the local `vibevoice` backend, vLLM runs in a Docker network namespace created with `--network none`, FastAPI joins that namespace and talks to vLLM over namespace-local loopback (`127.0.0.1:8000` inside that namespace only), and the only host-facing backend path is the Unix socket consumed by the Rust proxy. The vLLM container does not get the socket mount or client credentials.
 
-Streaming is true end-to-end for authenticated transcription, token-by-token — no buffering at any proxy or response layer. vLLM emits SSE deltas → `httpx.stream()` / `aiter_lines()` yields each line as it arrives → `vllm_client` parses and yields each token → worker puts it into a per-job `asyncio.Queue` → route handler's async generator pulls and yields SSE events → FastAPI `StreamingResponse` (with `X-Accel-Buffering: no`) sends each chunk to the client immediately. Uploads and parser spill files are written under the private runtime directory `/tmp/vibevoice-vendor-UID/tmp`, kept out of the container's small RAM-backed `/tmp`, and deleted on completion, failure, cancellation, setup, or teardown.
+Streaming is true end-to-end for authenticated transcription, token-by-token — no buffering at any proxy or response layer. vLLM emits SSE deltas → `httpx.stream()` / `aiter_lines()` yields each line as it arrives → `vllm_client` parses and yields each token → worker puts it into a per-job `asyncio.Queue` → route handler's async generator pulls and yields SSE events → FastAPI `StreamingResponse` (with `X-Accel-Buffering: no`) sends each chunk to the client immediately. Transcription upload accepts one wire format: HeliBoard's canonical 16 kHz mono 16-bit PCM WAV as multipart field `audio` with `Content-Type: audio/wav`; the server validates the WAV header and duration before queueing. Uploads and parser spill files are written under the private runtime directory `/tmp/vibevoice-vendor-UID/tmp`, kept out of the container's small RAM-backed `/tmp`, and deleted on completion, failure, cancellation, setup, or teardown.
 
 ## Setup
 
-Prerequisites: `docker` already usable by the current user (with NVIDIA GPU support), `uv`, `cargo`, `git`, `curl`, and `ffprobe`.
+Prerequisites for the default local VibeVoice backend: `docker` already usable by the current user (with NVIDIA GPU support), `uv`, `cargo`, `git`, and `curl`. The Groq backend also requires host `ffmpeg`.
 
 ```bash
 ./setup.sh
@@ -94,7 +94,7 @@ CUDA graph capture dominates: vLLM pre-records optimized GPU execution graphs fo
 
 **Known issue — repetition loop on long audio**: On a 7-minute test file (`sample/letter_factory_leap_frog.wav`), the model transcribed correctly up to ~4m20s then degenerated into an infinite repetition loop ("wop wop wop...") on a segment that likely contains music or sound effects. The loop continued until the 48K token limit was exhausted, inflating wall-clock time to 8m31s (most of it spent generating junk tokens). This is a known LLM degeneration pattern, not a server bug — the model lacks a built-in repetition penalty. Short speech-only files transcribe without issue.
 
-Pinned versions: VibeVoice at `1807b858d4f7dffdd286249a01616c243e488c9e`, VibeVoice-ASR model snapshot at `d0c9efdb8d614685062c04425d91e01b6f37d944`, and `vllm/vllm-openai:v0.14.1` by image digest. The Docker build installs the vendored VibeVoice plugin with `--no-deps --no-build-isolation`, so VibeVoice's broad Python dependency metadata cannot trigger unpinned package resolution during image builds. The Docker image also installs the explicitly pinned vLLM audio runtime packages required for `audio_url` transcription (`librosa`, `scipy`, `soundfile`, and their pinned runtime closure), then fails the build if vLLM still sees audio placeholders. The image does not install Ubuntu's broad `ffmpeg` package; it builds official FFmpeg `8.1.2` from a signed, SHA-256-pinned release tarball with network support disabled and only the local `file`/`pipe` protocols plus the current audio demuxers/decoders needed for accepted uploads. During the image build, VibeVoice's ffmpeg/ffprobe audio subprocesses are patched to run at one process, one ffmpeg thread, local file/pipe protocols only, and a 900-second subprocess timeout. After all installs, the final image removes download/package-manager tools (`cmake`, `git`, `curl`, `gpg`, `ninja`, `pip`, and `apt` frontends) and fails the build if those commands are still present. The final image intentionally keeps the C compiler path because vLLM/Triton compiles runtime CUDA support during startup, and the build fails if `cc`, `gcc`, or `ld` are missing. `setup.sh` only reuses `vibevoice-vllm:latest` when image labels match the current Dockerfile, locked Python runtime, server files, pinned VibeVoice checkout, model revision, and security profile; stale images are rebuilt, and images whose vLLM command still contains `--allowed-local-media-path` are refused. The VibeVoice plugin requires specific vLLM multimodal APIs (`PromptUpdateDetails`, `MultiModalKwargsItems`, `AudioMediaIO`) that only exist in `v0.11.1`–`v0.14.1`. The `VibeVoice/` directory is in `.gitignore`.
+Pinned versions: VibeVoice at `1807b858d4f7dffdd286249a01616c243e488c9e`, VibeVoice-ASR model snapshot at `d0c9efdb8d614685062c04425d91e01b6f37d944`, and `vllm/vllm-openai:v0.14.1` by image digest. The Docker build installs the vendored VibeVoice plugin with `--no-deps --no-build-isolation`, so VibeVoice's broad Python dependency metadata cannot trigger unpinned package resolution during image builds. The Docker image also installs the explicitly pinned vLLM audio runtime packages required for `audio_url` transcription (`librosa`, `scipy`, `soundfile`, and their pinned runtime closure), then fails the build if vLLM still sees audio placeholders. The image does not install Ubuntu's broad `ffmpeg` package; it builds official FFmpeg `8.1.2` from a signed, SHA-256-pinned release tarball with network support disabled and only the local `file`/`pipe` protocols plus the WAV demuxer and PCM S16LE codec needed for canonical HeliBoard WAV ingress. During the image build, VibeVoice's ffmpeg/ffprobe audio subprocesses are patched to run at one process, one ffmpeg thread, local file/pipe protocols only, and a 900-second subprocess timeout. After all installs, the final image removes download/package-manager tools (`cmake`, `git`, `curl`, `gpg`, `ninja`, `pip`, and `apt` frontends) and fails the build if those commands are still present. The final image intentionally keeps the C compiler path because vLLM/Triton compiles runtime CUDA support during startup, and the build fails if `cc`, `gcc`, or `ld` are missing. `setup.sh` only reuses `vibevoice-vllm:latest` when image labels match the current Dockerfile, locked Python runtime, server files, pinned VibeVoice checkout, model revision, and security profile; stale images are rebuilt, and images whose vLLM command still contains `--allowed-local-media-path` are refused. The VibeVoice plugin requires specific vLLM multimodal APIs (`PromptUpdateDetails`, `MultiModalKwargsItems`, `AudioMediaIO`) that only exist in `v0.11.1`–`v0.14.1`. The `VibeVoice/` directory is in `.gitignore`.
 
 See [doc/vibevoice-asr-quality-investigation.md](doc/vibevoice-asr-quality-investigation.md) for a deep-dive into every inference parameter, dtype, prompt template, and audio preprocessing step — verifying correctness against the official Microsoft reference code.
 
@@ -168,6 +168,8 @@ asyncio.run(main())
 | GET | `/v1/queue/status` | mTLS | Get your queue position and job status |
 | GET | `/health` | mTLS | Proxy-local liveness check; does not reach FastAPI or vLLM |
 
+`POST /v1/transcribe` accepts exactly one `audio` file part and optionally one `hotwords` text part. The `audio` filename must end in `.wav`, its part `Content-Type` must be `audio/wav`, and the bytes must be HeliBoard's canonical 44-byte-header WAV shape: RIFF/WAVE PCM, mono, 16 kHz, 16-bit little-endian, data chunk at byte 36, and declared sizes matching the actual file length.
+
 ### curl
 
 ```bash
@@ -194,7 +196,7 @@ curl --insecure \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N \
-  -F "audio=@sample/recording_with_hebrew.wav" \
+  -F "audio=@sample/recording_with_hebrew.wav;type=audio/wav" \
   https://HOST:42862/v1/transcribe
 
 # Transcribe with hotwords
@@ -203,7 +205,7 @@ curl --insecure \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N \
-  -F "audio=@sample/recording_with_hebrew.wav" \
+  -F "audio=@sample/recording_with_hebrew.wav;type=audio/wav" \
   -F "hotwords=VibeVoice,ASR" \
   https://HOST:42862/v1/transcribe
 ```

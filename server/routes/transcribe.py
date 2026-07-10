@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from server.audio import detect_mime_type, probe_duration_file
+from server.audio import read_heliboard_wav_info, validate_heliboard_wav_metadata
 from server.client_identity import require_client_identity
 from server.models import ErrorEvent, JobStatus, QueuePositionEvent, TranscriptionChunkEvent
 from server.queue import TranscriptionJob, TranscriptionQueue
@@ -138,15 +138,45 @@ def _get_audio_upload(form: FormData) -> UploadFile:
     return audio
 
 
-def _get_hotwords(form: FormData) -> str | None:
-    hotwords = form.get("hotwords")
-    if hotwords is None:
+def _validate_hotwords_value(value: object) -> str | None:
+    if value is None:
         return None
-    if not isinstance(hotwords, str):
+    if not isinstance(value, str):
         raise HTTPException(status_code=400, detail="hotwords must be a text field")
-    if _CONTROL_TOKEN_RE.search(hotwords):
+    if _CONTROL_TOKEN_RE.search(value):
         raise HTTPException(status_code=400, detail="hotwords contain reserved control tokens")
-    return hotwords
+    return value
+
+
+def _get_hotwords(form: FormData) -> str | None:
+    return _validate_hotwords_value(form.get("hotwords"))
+
+
+def _extract_transcribe_form(form: FormData) -> tuple[UploadFile, str | None]:
+    audio: UploadFile | None = None
+    hotwords: str | None = None
+    seen_audio = False
+    seen_hotwords = False
+
+    for name, value in form.multi_items():
+        if name == "audio":
+            if seen_audio:
+                raise HTTPException(status_code=400, detail="Duplicate audio field")
+            seen_audio = True
+            if not isinstance(value, UploadFile):
+                raise HTTPException(status_code=400, detail="audio must be a file field")
+            audio = value
+        elif name == "hotwords":
+            if seen_hotwords:
+                raise HTTPException(status_code=400, detail="Duplicate hotwords field")
+            seen_hotwords = True
+            hotwords = _validate_hotwords_value(value)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unexpected form field: {name}")
+
+    if audio is None:
+        raise HTTPException(status_code=400, detail="Audio file is required")
+    return audio, hotwords
 
 
 @router.post("/v1/transcribe")
@@ -168,8 +198,7 @@ async def transcribe(
     response_ready = False
     try:
         form = await _parse_transcribe_form(request)
-        audio = _get_audio_upload(form)
-        hotwords = _get_hotwords(form)
+        audio, hotwords = _extract_transcribe_form(form)
 
         response = await _transcribe_authenticated(request, audio, job, hotwords)
         response_ready = True
@@ -190,10 +219,8 @@ async def _transcribe_authenticated(
     queue: TranscriptionQueue = request.app.state.queue
     max_audio_bytes: int = request.app.state.settings.max_audio_bytes
 
-    if audio.filename is None:
-        raise HTTPException(status_code=400, detail="Audio file must include a filename")
     try:
-        mime_type = detect_mime_type(audio.filename)
+        mime_type = validate_heliboard_wav_metadata(audio.filename, audio.content_type)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -210,9 +237,9 @@ async def _transcribe_authenticated(
             ) from None
         job.audio_path = audio_path
         try:
-            job.audio_duration_seconds = await probe_duration_file(audio_path)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=422, detail=f"Cannot read audio: {exc}") from None
+            job.audio_duration_seconds = read_heliboard_wav_info(audio_path).duration_seconds
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid HeliBoard WAV: {exc}") from None
         queue.submit(job.job_id)
     except Exception:
         queue.cancel(job.job_id)

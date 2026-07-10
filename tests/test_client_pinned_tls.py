@@ -11,6 +11,7 @@ import pytest
 from client.client import (
     VibevoiceClient,
     _build_ssl_context,
+    _multipart_body,
     _normalize_base_url,
     _normalize_server_pin,
     _spki_pin_from_certificate_der,
@@ -88,6 +89,14 @@ def test_client_requires_server_pin_and_client_certificate(tmp_path: Path) -> No
     assert client._base_url == "https://example.test:42862"
     assert client._server_pin == GOOD_PIN
     assert client._cert == (tls["client_cert_path"], tls["client_key_path"])
+
+
+def test_client_multipart_body_rejects_non_wav_extension(tmp_path: Path) -> None:
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"not wav")
+
+    with pytest.raises(ValueError, match=r"\.wav"):
+        list(_multipart_body(audio, hotwords=None))
 
 
 def test_cli_rejects_ca_cert_argument(tmp_path: Path) -> None:

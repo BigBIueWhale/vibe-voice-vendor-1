@@ -1,6 +1,5 @@
 import asyncio
 import io
-import shutil
 import struct
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
@@ -14,14 +13,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from httpx import ASGITransport
-from starlette.datastructures import FormData, UploadFile
+from starlette.datastructures import FormData, Headers, UploadFile
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.types import Message, Receive, Scope, Send
 
 import server.routes.transcribe as transcribe_route
 from server.app import RequireHTTPSMiddleware, create_app
-from server.audio import probe_duration_file
+from server.audio import read_heliboard_wav_info
 from server.config import Settings
 from server.models import JobStatus
 from server.queue import TranscriptionJob, TranscriptionQueue
@@ -30,7 +29,6 @@ TEST_CLIENT_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 FORWARDED_HTTPS_HEADERS = {"X-Forwarded-Proto": "https"}
 CLIENT_IDENTITY_HEADERS = {"x-vvv-client-spki-sha256": TEST_CLIENT_IDENTITY}
 AUTH_HEADERS = {**CLIENT_IDENTITY_HEADERS, **FORWARDED_HTTPS_HEADERS}
-has_ffprobe = shutil.which("ffprobe") is not None
 
 
 def _iter_original_routes(routes: Iterable[Any]) -> Iterator[Any]:
@@ -222,6 +220,83 @@ async def test_transcribe_body_limit_runs_before_spool_upload(
     assert not spool_called
 
 
+@pytest.mark.parametrize(
+    ("filename", "content_type", "detail"),
+    [
+        ("test.mp3", "audio/mpeg", ".wav"),
+        ("test.WAV", "audio/wav", ".wav"),
+        ("test.wav", "application/octet-stream", "audio/wav"),
+    ],
+)
+async def test_transcribe_rejects_non_heliboard_upload_metadata_before_spooling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    content_type: str,
+    detail: str,
+) -> None:
+    spool_called = False
+
+    async def fail_if_spool_is_called(upload: UploadFile, max_audio_bytes: int) -> tuple[str, int]:
+        nonlocal spool_called
+        _ = upload, max_audio_bytes
+        spool_called = True
+        raise AssertionError("spool_upload called for rejected audio metadata")
+
+    monkeypatch.setattr(transcribe_route, "_spool_upload", fail_if_spool_is_called)
+    s = _make_all_settings(tmp_path, max_queue_size=1)
+
+    async with _lifespan_client(s) as client:
+        resp = await client.post(
+            "/v1/transcribe",
+            headers=AUTH_HEADERS,
+            files={"audio": (filename, b"not audio", content_type)},
+        )
+
+    assert resp.status_code == 400
+    assert detail in resp.json()["detail"]
+    assert not spool_called
+
+
+async def test_transcribe_rejects_unexpected_form_field(
+    tmp_path: Path,
+) -> None:
+    s = _make_all_settings(tmp_path, max_queue_size=1)
+
+    async with _lifespan_client(s) as client:
+        resp = await client.post(
+            "/v1/transcribe",
+            headers=AUTH_HEADERS,
+            data={"mode": "legacy"},
+            files={
+                "audio": (
+                    "test.wav",
+                    _make_wav(sample_rate=16000, num_samples=16000),
+                    "audio/wav",
+                )
+            },
+        )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Unexpected form field: mode"
+
+
+async def test_transcribe_rejects_malformed_wav_before_queue_processing(
+    tmp_path: Path,
+) -> None:
+    s = _make_all_settings(tmp_path, max_queue_size=1)
+
+    async with _lifespan_client(s) as client:
+        for _ in range(2):
+            resp = await client.post(
+                "/v1/transcribe",
+                headers=AUTH_HEADERS,
+                files={"audio": ("test.wav", b"not audio", "audio/wav")},
+            )
+            assert resp.status_code == 422
+            assert "Invalid HeliBoard WAV" in resp.json()["detail"]
+
+
 async def test_transcribe_queue_full_does_not_parse_multipart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -361,7 +436,6 @@ async def test_spool_upload_uses_private_temp_directory(
     assert not path.parent.exists()
 
 
-@pytest.mark.skipif(not has_ffprobe, reason="ffprobe not installed")
 async def test_concat_upload_cannot_reference_shared_temp_audio(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -378,8 +452,8 @@ async def test_concat_upload_cannot_reference_shared_temp_audio(
     try:
         assert path.parent != tmp_path
         assert not (path.parent / "meeting.wav").exists()
-        with pytest.raises(RuntimeError, match="ffprobe failed"):
-            await probe_duration_file(audio_path)
+        with pytest.raises(ValueError, match="RIFF"):
+            read_heliboard_wav_info(audio_path)
     finally:
         TranscriptionJob(audio_path=audio_path).discard_audio()
 
@@ -525,17 +599,16 @@ async def test_transcribe_stream_keeps_sse_connection_alive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_probe_duration_file(path: str) -> float:
-        _ = path
-        return 1.0
-
-    monkeypatch.setattr(transcribe_route, "probe_duration_file", fake_probe_duration_file)
     monkeypatch.setattr(transcribe_route, "_SSE_CHUNK_WAIT_SECONDS", 0.001)
     monkeypatch.setattr(transcribe_route, "_SSE_KEEPALIVE_SECONDS", 0.001)
     settings = _make_all_settings(tmp_path, max_queue_size=1)
     queue = TranscriptionQueue(max_size=settings.max_queue_size)
     request = _FakeTranscribeRequest(settings, queue)
-    upload = UploadFile(io.BytesIO(_make_wav(sample_rate=8000, num_samples=8000)), filename="x.wav")
+    upload = UploadFile(
+        io.BytesIO(_make_wav(sample_rate=16000, num_samples=16000)),
+        filename="x.wav",
+        headers=Headers({"content-type": "audio/wav"}),
+    )
     job = TranscriptionJob(client_identity=TEST_CLIENT_IDENTITY)
     queue.reserve(job)
 

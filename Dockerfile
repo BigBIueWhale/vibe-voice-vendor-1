@@ -41,11 +41,10 @@ RUN set -eux; \
         --enable-ffmpeg \
         --enable-ffprobe \
         --enable-protocol=file,pipe \
-        --enable-demuxer=wav,mp3,mov,flac,ogg,matroska,asf,aac \
+        --enable-demuxer=wav \
         --enable-muxer=pcm_s16le,null \
-        --enable-decoder=aac,aac_fixed,aac_latm,alac,flac,mp3,mp3float,opus,vorbis,speex,wmav1,wmav2,wmapro,wmalossless,wmavoice,pcm_alaw,pcm_mulaw,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24le,pcm_s24le_planar,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s8,pcm_u8,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,adpcm_ms,adpcm_ima_wav,adpcm_g722,adpcm_g726,adpcm_g726le,adpcm_yamaha \
+        --enable-decoder=pcm_s16le \
         --enable-encoder=pcm_s16le \
-        --enable-parser=aac,aac_latm,flac,mpegaudio,opus,vorbis \
         --enable-filter=aresample,aformat,anull,pan,channelmap; \
     make -j"$(nproc)"; \
     make install; \
@@ -93,18 +92,59 @@ for protocol in ("http", "https", "tcp", "udp", "tls", "data", "concat", "subfil
         raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {protocol} protocol")
 
 demuxers = run([str(BIN / "ffmpeg"), "-hide_banner", "-demuxers"])
-for demuxer in ("wav", "mp3", "mov", "flac", "ogg", "matroska", "asf", "aac"):
+for demuxer in ("wav",):
     if not has_line(demuxers, rf"^\s*D\s+{demuxer}\b"):
         raise RuntimeError(f"minimal FFmpeg build is missing {demuxer} demuxer")
-for demuxer in ("hls", "concat", "dash", "rtsp", "image2", "mpegts"):
+for demuxer in (
+    "mp3",
+    "mov",
+    "flac",
+    "ogg",
+    "matroska",
+    "asf",
+    "aac",
+    "hls",
+    "concat",
+    "dash",
+    "rtsp",
+    "image2",
+    "mpegts",
+):
     if has_line(demuxers, rf"^\s*D\s+{demuxer}\b"):
         raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {demuxer} demuxer")
 
 decoders = run([str(BIN / "ffmpeg"), "-hide_banner", "-decoders"])
-for decoder in ("aac", "flac", "mp3", "opus", "vorbis", "pcm_s16le"):
+for decoder in ("pcm_s16le",):
     if not has_line(decoders, rf"^ A.*D\s+{decoder}\b"):
         raise RuntimeError(f"minimal FFmpeg build is missing {decoder} decoder")
-for decoder in ("jpeg2000", "pgm", "ppm", "pnm", "png", "gif", "webp", "h264", "hevc", "av1", "als"):
+for decoder in (
+    "aac",
+    "alac",
+    "flac",
+    "mp3",
+    "mp3float",
+    "opus",
+    "vorbis",
+    "speex",
+    "wmav1",
+    "wmav2",
+    "wmapro",
+    "wmalossless",
+    "wmavoice",
+    "adpcm_ms",
+    "adpcm_ima_wav",
+    "jpeg2000",
+    "pgm",
+    "ppm",
+    "pnm",
+    "png",
+    "gif",
+    "webp",
+    "h264",
+    "hevc",
+    "av1",
+    "als",
+):
     if has_line(decoders, rf"^.{{6}}\s+{decoder}\b"):
         raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {decoder} decoder")
 

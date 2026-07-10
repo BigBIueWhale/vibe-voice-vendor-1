@@ -628,33 +628,14 @@ def test_runtime_image_uses_pinned_minimal_ffmpeg_not_distro_package() -> None:
         "--disable-avdevice",
         "--disable-swscale",
         "--enable-protocol=file,pipe",
-        "--enable-demuxer=wav,mp3,mov,flac,ogg,matroska,asf,aac",
+        "--enable-demuxer=wav",
         "--enable-muxer=pcm_s16le,null",
         "--enable-encoder=pcm_s16le",
-        "--enable-parser=aac,aac_latm,flac,mpegaudio,opus,vorbis",
         "--enable-filter=aresample,aformat,anull,pan,channelmap",
     ]:
         assert required in dockerfile
 
-    for expected_decoder in [
-        "aac",
-        "alac",
-        "flac",
-        "mp3",
-        "mp3float",
-        "opus",
-        "vorbis",
-        "speex",
-        "wmav1",
-        "wmav2",
-        "wmapro",
-        "wmalossless",
-        "wmavoice",
-        "pcm_s16le",
-        "adpcm_ms",
-        "adpcm_ima_wav",
-    ]:
-        assert expected_decoder in dockerfile
+    assert "--enable-decoder=pcm_s16le" in dockerfile
 
     for forbidden in [
         "--enable-protocol=http",
@@ -662,9 +643,22 @@ def test_runtime_image_uses_pinned_minimal_ffmpeg_not_distro_package() -> None:
         "--enable-protocol=tcp",
         "--enable-protocol=udp",
         "--enable-protocol=data",
+        "--enable-demuxer=mp3",
+        "--enable-demuxer=mov",
+        "--enable-demuxer=flac",
+        "--enable-demuxer=ogg",
+        "--enable-demuxer=matroska",
+        "--enable-demuxer=asf",
+        "--enable-demuxer=aac",
         "--enable-demuxer=hls",
         "--enable-demuxer=concat",
         "--enable-demuxer=image2",
+        "--enable-decoder=aac",
+        "--enable-decoder=flac",
+        "--enable-decoder=mp3",
+        "--enable-decoder=opus",
+        "--enable-parser=aac",
+        "--enable-parser=opus",
         "--enable-decoder=jpeg2000",
         "--enable-decoder=png",
         "--enable-decoder=h264",
@@ -674,7 +668,7 @@ def test_runtime_image_uses_pinned_minimal_ffmpeg_not_distro_package() -> None:
 
     assert "minimal FFmpeg build unexpectedly enables" in dockerfile
     assert "minimal FFmpeg decode smoke test returned" in dockerfile
-    assert "minimal-pinned-ffmpeg-no-package-tools-v8" in setup
+    assert "heliboard-wav-only-ffmpeg-no-package-tools-v9" in setup
     assert "official FFmpeg `8.1.2`" in docs
     assert "Ubuntu's broad `ffmpeg` package" in docs
 
@@ -715,14 +709,24 @@ def test_runtime_image_removes_download_and_package_tools_but_keeps_required_com
         assert path in dockerfile
 
     assert "hash -r; \\" in dockerfile
-    assert "for banned in git curl cmake ninja gpg gpgv dirmngr pip pip3 apt apt-get; do" in dockerfile
+    assert (
+        "for banned in git curl cmake ninja gpg gpgv dirmngr pip pip3 apt apt-get; do"
+        in dockerfile
+    )
     assert 'command -v "$banned"' in dockerfile
     assert "ERROR: final image unexpectedly contains $banned" in dockerfile
     assert "command -v cc >/dev/null" in dockerfile
     assert "command -v gcc >/dev/null" in dockerfile
     assert "command -v ld >/dev/null" in dockerfile
-    assert 'python3 -c "import vllm; import vllm_plugin; import librosa; import scipy.signal; import soundfile"' in dockerfile
-    assert 'PYTHONPATH=/opt/vvv-server /opt/vvv-server-venv/bin/python -c "import server.app"' in dockerfile
+    assert (
+        'python3 -c "import vllm; import vllm_plugin; import librosa; '
+        'import scipy.signal; import soundfile"'
+        in dockerfile
+    )
+    assert (
+        'PYTHONPATH=/opt/vvv-server /opt/vvv-server-venv/bin/python -c "import server.app"'
+        in dockerfile
+    )
 
 
 def test_vibevoice_ffmpeg_decode_is_bounded_in_runtime_image() -> None:

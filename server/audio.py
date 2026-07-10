@@ -1,27 +1,30 @@
 import asyncio
 import base64
 import contextlib
-import json
 import os
+import struct
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-_FFPROBE_TIMEOUT_SECONDS = 120.0
 _FFMPEG_TIMEOUT_SECONDS = 900.0
 _FFMPEG_THREADS = "1"
 
-_MIME_MAP = {
-    ".wav": "audio/wav",
-    ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4",
-    ".mp4": "audio/mp4",
-    ".flac": "audio/flac",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg",
-    ".webm": "audio/webm",
-    ".wma": "audio/x-ms-wma",
-    ".aac": "audio/aac",
-}
+HELIBOARD_WAV_MIME_TYPE = "audio/wav"
+HELIBOARD_WAV_SUFFIX = ".wav"
+_HELIBOARD_WAV_HEADER_BYTES = 44
+_HELIBOARD_WAV_SAMPLE_RATE = 16000
+_HELIBOARD_WAV_CHANNELS = 1
+_HELIBOARD_WAV_BITS_PER_SAMPLE = 16
+_HELIBOARD_WAV_BLOCK_ALIGN = 2
+_HELIBOARD_WAV_BYTE_RATE = 32000
+_HELIBOARD_WAV_DATA_BYTES_PER_SECOND = _HELIBOARD_WAV_BYTE_RATE
+
+
+@dataclass(frozen=True)
+class HeliboardWavInfo:
+    duration_seconds: float
+    data_size: int
 
 
 async def _communicate_or_kill(
@@ -57,19 +60,80 @@ def encode_audio_file_base64(path: str) -> str:
     return encode_audio_base64(Path(path).read_bytes())
 
 
-def detect_mime_type(filename: str) -> str:
-    """Detect audio MIME type from filename extension.
+def validate_heliboard_wav_metadata(filename: str | None, content_type: str | None) -> str:
+    """Validate the public upload metadata for the single supported wire format."""
+    if filename is None or filename == "":
+        raise ValueError("Audio file must include a filename")
+    suffix = PurePosixPath(filename).suffix
+    if suffix != HELIBOARD_WAV_SUFFIX:
+        raise ValueError("Audio filename must end in .wav")
+    if content_type != HELIBOARD_WAV_MIME_TYPE:
+        raise ValueError("Audio part Content-Type must be audio/wav")
+    return HELIBOARD_WAV_MIME_TYPE
 
-    Raises ValueError if the extension is not recognized.
-    The caller must provide a filename with a supported audio extension.
-    """
-    suffix = PurePosixPath(filename).suffix.lower()
-    if suffix not in _MIME_MAP:
-        raise ValueError(
-            f"Unrecognized audio extension '{suffix}' in filename '{filename}'. "
-            f"Supported extensions: {', '.join(sorted(_MIME_MAP.keys()))}"
-        )
-    return _MIME_MAP[suffix]
+
+def read_heliboard_wav_info(path: str) -> HeliboardWavInfo:
+    """Read and validate the exact WAV container shape emitted by HeliBoard."""
+    file_size = os.path.getsize(path)
+    if file_size < _HELIBOARD_WAV_HEADER_BYTES:
+        raise ValueError("WAV file is too short")
+
+    with open(path, "rb") as f:
+        header = f.read(_HELIBOARD_WAV_HEADER_BYTES)
+    if len(header) != _HELIBOARD_WAV_HEADER_BYTES:
+        raise ValueError("WAV header is incomplete")
+
+    (
+        riff_magic,
+        riff_size,
+        wave_magic,
+        fmt_magic,
+        fmt_size,
+        audio_format,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        data_magic,
+        data_size,
+    ) = struct.unpack("<4sI4s4sIHHIIHH4sI", header)
+
+    if riff_magic != b"RIFF":
+        raise ValueError("WAV header must start with RIFF")
+    if riff_size != file_size - 8:
+        raise ValueError("WAV RIFF size does not match file length")
+    if wave_magic != b"WAVE":
+        raise ValueError("WAV header must declare WAVE")
+    if fmt_magic != b"fmt ":
+        raise ValueError("WAV fmt chunk must start at byte 12")
+    if fmt_size != 16:
+        raise ValueError("WAV fmt chunk must be canonical PCM size 16")
+    if audio_format != 1:
+        raise ValueError("WAV audio format must be PCM")
+    if channels != _HELIBOARD_WAV_CHANNELS:
+        raise ValueError("WAV must be mono")
+    if sample_rate != _HELIBOARD_WAV_SAMPLE_RATE:
+        raise ValueError("WAV sample rate must be 16000 Hz")
+    if byte_rate != _HELIBOARD_WAV_BYTE_RATE:
+        raise ValueError("WAV byte rate must be 32000")
+    if block_align != _HELIBOARD_WAV_BLOCK_ALIGN:
+        raise ValueError("WAV block align must be 2")
+    if bits_per_sample != _HELIBOARD_WAV_BITS_PER_SAMPLE:
+        raise ValueError("WAV bits per sample must be 16")
+    if data_magic != b"data":
+        raise ValueError("WAV data chunk must start at byte 36")
+    if data_size != file_size - _HELIBOARD_WAV_HEADER_BYTES:
+        raise ValueError("WAV data size does not match file length")
+    if data_size == 0:
+        raise ValueError("WAV data chunk is empty")
+    if data_size % _HELIBOARD_WAV_BLOCK_ALIGN != 0:
+        raise ValueError("WAV data size must align to 16-bit mono samples")
+
+    return HeliboardWavInfo(
+        duration_seconds=data_size / _HELIBOARD_WAV_DATA_BYTES_PER_SECOND,
+        data_size=data_size,
+    )
 
 
 async def compress_to_opus(raw_bytes: bytes) -> bytes:
@@ -122,58 +186,3 @@ async def compress_file_to_opus(path: str) -> bytes:
             return f.read()
     finally:
         os.unlink(dst_path)
-
-
-async def probe_duration(raw_bytes: bytes) -> float:
-    """Get audio duration in seconds via ffprobe without transcoding.
-
-    Uses a temp file instead of stdin pipe because ffprobe cannot determine
-    duration for some formats (e.g. WAV) when reading from a pipe.
-    """
-    with tempfile.NamedTemporaryFile(suffix=".audio") as tmp:
-        tmp.write(raw_bytes)
-        tmp.flush()
-        return await probe_duration_file(tmp.name)
-
-
-async def probe_duration_file(path: str) -> float:
-    """Get audio duration in seconds via ffprobe for a file path."""
-    process = await asyncio.create_subprocess_exec(
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-protocol_whitelist",
-        "file",
-        "-print_format",
-        "json",
-        "-show_format",
-        path,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await _communicate_or_kill(
-        process,
-        timeout_seconds=_FFPROBE_TIMEOUT_SECONDS,
-        operation="ffprobe",
-    )
-
-    if process.returncode != 0:
-        error_msg = stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"ffprobe failed: {error_msg}")
-
-    try:
-        info = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"ffprobe output is not valid JSON: {exc}") from exc
-
-    if not isinstance(info, dict) or "format" not in info:
-        raise RuntimeError("ffprobe output missing 'format' key")
-    format_info = info["format"]
-    if not isinstance(format_info, dict):
-        raise RuntimeError("ffprobe output 'format' is not an object")
-    if "duration" not in format_info:
-        raise RuntimeError("ffprobe could not determine audio duration")
-    try:
-        return float(format_info["duration"])
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"ffprobe duration is not numeric: {format_info['duration']!r}") from exc

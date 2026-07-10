@@ -1,21 +1,21 @@
 import asyncio
 import base64
-import shutil
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from server.audio import (
+    HELIBOARD_WAV_MIME_TYPE,
     compress_file_to_opus,
-    detect_mime_type,
     encode_audio_base64,
-    probe_duration,
-    probe_duration_file,
+    read_heliboard_wav_info,
+    validate_heliboard_wav_metadata,
 )
 
-has_ffprobe = shutil.which("ffprobe") is not None
+WavMutator = Callable[[bytes], bytes]
 
 
 class _FakeProcess:
@@ -93,116 +93,94 @@ def test_encode_audio_base64_roundtrip() -> None:
     assert base64.b64decode(encoded) == raw
 
 
-def test_detect_mime_type_wav() -> None:
-    assert detect_mime_type("recording.wav") == "audio/wav"
+def test_validate_heliboard_wav_metadata_accepts_exact_contract() -> None:
+    assert (
+        validate_heliboard_wav_metadata("recording_20260710_121314_123.wav", "audio/wav")
+        == HELIBOARD_WAV_MIME_TYPE
+    )
 
 
-def test_detect_mime_type_mp3() -> None:
-    assert detect_mime_type("song.mp3") == "audio/mpeg"
-
-
-def test_detect_mime_type_flac() -> None:
-    assert detect_mime_type("track.flac") == "audio/flac"
-
-
-def test_detect_mime_type_ogg() -> None:
-    assert detect_mime_type("voice.ogg") == "audio/ogg"
-
-
-def test_detect_mime_type_opus() -> None:
-    assert detect_mime_type("voice.opus") == "audio/ogg"
-
-
-def test_detect_mime_type_unknown_raises() -> None:
-    with pytest.raises(ValueError, match="Unrecognized audio extension"):
-        detect_mime_type("data.xyz")
-
-
-def test_detect_mime_type_case_insensitive() -> None:
-    assert detect_mime_type("FILE.WAV") == "audio/wav"
-    assert detect_mime_type("track.MP3") == "audio/mpeg"
-
-
-@pytest.mark.skipif(not has_ffprobe, reason="ffprobe not installed")
-async def test_probe_duration_wav() -> None:
-    wav_bytes = _make_wav(sample_rate=16000, num_samples=16000)
-    duration = await probe_duration(wav_bytes)
-    assert abs(duration - 1.0) < 0.1
-
-
-@pytest.mark.skipif(not has_ffprobe, reason="ffprobe not installed")
-async def test_probe_duration_half_second() -> None:
-    wav_bytes = _make_wav(sample_rate=16000, num_samples=8000)
-    duration = await probe_duration(wav_bytes)
-    assert abs(duration - 0.5) < 0.1
-
-
-@pytest.mark.skipif(not has_ffprobe, reason="ffprobe not installed")
-async def test_probe_duration_invalid() -> None:
-    with pytest.raises(RuntimeError, match="ffprobe failed"):
-        await probe_duration(b"not audio data at all")
-
-
-async def test_probe_duration_rejects_malformed_ffprobe_json(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("filename", "content_type", "message"),
+    [
+        (None, "audio/wav", "filename"),
+        ("", "audio/wav", "filename"),
+        ("recording.WAV", "audio/wav", r"\.wav"),
+        ("recording.mp3", "audio/mpeg", r"\.wav"),
+        ("recording.wav", None, "Content-Type"),
+        ("recording.wav", "application/octet-stream", "audio/wav"),
+        ("recording.wav", "audio/x-wav", "audio/wav"),
+    ],
+)
+def test_validate_heliboard_wav_metadata_rejects_non_contract_values(
+    filename: str | None,
+    content_type: str | None,
+    message: str,
 ) -> None:
-    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        return _FakeProcess(b"not json")
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    with pytest.raises(RuntimeError, match="ffprobe output is not valid JSON"):
-        await probe_duration_file("audio.wav")
+    with pytest.raises(ValueError, match=message):
+        validate_heliboard_wav_metadata(filename, content_type)
 
 
-async def test_probe_duration_rejects_non_numeric_duration(
-    monkeypatch: pytest.MonkeyPatch,
+def test_read_heliboard_wav_info_accepts_exact_16khz_mono_pcm(tmp_path: Path) -> None:
+    path = tmp_path / "recording.wav"
+    path.write_bytes(_make_wav(sample_rate=16000, num_samples=16000))
+
+    info = read_heliboard_wav_info(str(path))
+
+    assert info.duration_seconds == 1.0
+    assert info.data_size == 32000
+
+
+@pytest.mark.parametrize(
+    ("mutator", "message"),
+    [
+        (lambda b: b[:0] + b"NOPE" + b[4:], "RIFF"),
+        (lambda b: b[:8] + b"NOPE" + b[12:], "WAVE"),
+        (lambda b: b[:12] + b"JUNK" + b[16:], "fmt"),
+        (lambda b: b[:36] + b"JUNK" + b[40:], "data"),
+        (lambda b: b[:20] + struct.pack("<H", 3) + b[22:], "PCM"),
+        (lambda b: b[:22] + struct.pack("<H", 2) + b[24:], "mono"),
+        (lambda b: b[:24] + struct.pack("<I", 8000) + b[28:], "16000"),
+        (lambda b: b[:28] + struct.pack("<I", 16000) + b[32:], "32000"),
+        (lambda b: b[:32] + struct.pack("<H", 4) + b[34:], "block align"),
+        (lambda b: b[:34] + struct.pack("<H", 24) + b[36:], "16"),
+        (lambda b: b[:40] + struct.pack("<I", 0) + b[44:], "data size"),
+        (lambda b: b[:43], "too short"),
+        (lambda b: b + b"\x00", "RIFF size"),
+    ],
+)
+def test_read_heliboard_wav_info_rejects_non_canonical_wav(
+    tmp_path: Path,
+    mutator: WavMutator,
+    message: str,
 ) -> None:
-    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        return _FakeProcess(b'{"format":{"duration":"nope"}}')
+    path = tmp_path / "recording.wav"
+    path.write_bytes(mutator(_make_wav(sample_rate=16000, num_samples=16000)))
 
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    with pytest.raises(RuntimeError, match="ffprobe duration is not numeric"):
-        await probe_duration_file("audio.wav")
+    with pytest.raises(ValueError, match=message):
+        read_heliboard_wav_info(str(path))
 
 
-async def test_probe_duration_uses_local_file_protocol_whitelist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_args: list[str] = []
+def test_read_heliboard_wav_info_rejects_extra_chunks(tmp_path: Path) -> None:
+    wav = _make_wav(sample_rate=16000, num_samples=16000)
+    inserted_chunk = b"LIST\x04\x00\x00\x00abcd"
+    file_size = len(wav) + len(inserted_chunk)
+    with_list_chunk = (
+        wav[:4] + struct.pack("<I", file_size - 8) + wav[8:36] + inserted_chunk + wav[36:]
+    )
+    path = tmp_path / "recording.wav"
+    path.write_bytes(with_list_chunk)
 
-    async def fake_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured_args[:] = [str(arg) for arg in args]
-        return _FakeProcess(b'{"format":{"duration":"1.25"}}')
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    assert await probe_duration_file("audio.wav") == 1.25
-    assert captured_args[:5] == [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-protocol_whitelist",
-        "file",
-    ]
+    with pytest.raises(ValueError, match="data chunk"):
+        read_heliboard_wav_info(str(path))
 
 
-async def test_probe_duration_timeout_kills_ffprobe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    process = _HangingProcess()
+def test_read_heliboard_wav_info_rejects_empty_data_chunk(tmp_path: Path) -> None:
+    path = tmp_path / "recording.wav"
+    path.write_bytes(_make_wav(sample_rate=16000, num_samples=0))
 
-    async def fake_exec(*args: Any, **kwargs: Any) -> _HangingProcess:
-        return process
-
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-    monkeypatch.setattr("server.audio._FFPROBE_TIMEOUT_SECONDS", 0.001)
-
-    with pytest.raises(RuntimeError, match="ffprobe timed out"):
-        await probe_duration_file("audio.wav")
-
-    assert process.killed
+    with pytest.raises(ValueError, match="empty"):
+        read_heliboard_wav_info(str(path))
 
 
 async def test_compress_uses_bounded_local_ffmpeg_args(

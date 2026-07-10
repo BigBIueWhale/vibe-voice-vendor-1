@@ -9,7 +9,7 @@ VLLM_CONTAINER="vibevoice-vllm"
 VLLM_IMAGE="vibevoice-vllm:latest"
 VIBEVOICE_COMMIT="1807b858d4f7dffdd286249a01616c243e488c9e"
 VIBEVOICE_MODEL_REVISION="d0c9efdb8d614685062c04425d91e01b6f37d944"
-VLLM_IMAGE_SECURITY_PROFILE="vvv-2026-07-10-minimal-pinned-ffmpeg-no-package-tools-v8"
+VLLM_IMAGE_SECURITY_PROFILE="vvv-2026-07-10-heliboard-wav-only-ffmpeg-no-package-tools-v9"
 
 PROXY_PORT=42862
 MAX_AUDIO_BYTES=524288000
@@ -131,11 +131,11 @@ validate_environment() {
     validate_simple_systemd_path "$BACKEND_TMP_HOST"
 
     if [[ "$BACKEND" == "vibevoice" ]]; then
-        for cmd in docker uv cargo git curl ffprobe; do
+        for cmd in docker uv cargo git curl; do
             require_cmd "$cmd"
         done
     else
-        for cmd in uv cargo curl ffprobe ffmpeg; do
+        for cmd in uv cargo curl ffmpeg; do
             require_cmd "$cmd"
         done
         validate_env_value "GROQ_API_KEY" "$GROQ_API_KEY"

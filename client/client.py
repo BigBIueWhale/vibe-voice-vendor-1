@@ -58,6 +58,7 @@ class VibevoiceClient:
     ) -> AsyncIterator[TranscriptionEvent]:
         """Upload audio and stream transcription events."""
         path = Path(audio_path)
+        _validate_wav_path(path)
         conn = self._connection()
         try:
             headers = self._headers()
@@ -227,6 +228,7 @@ def _build_ssl_context(cert: ClientCert) -> ssl.SSLContext:
 
 
 def _multipart_body(path: Path, hotwords: str | None) -> Iterable[bytes]:
+    _validate_wav_path(path)
     yield f"--{_BOUNDARY}\r\n".encode()
     yield (
         f'Content-Disposition: form-data; name="audio"; filename="{_safe_filename(path.name)}"\r\n'
@@ -246,6 +248,11 @@ def _multipart_body(path: Path, hotwords: str | None) -> Iterable[bytes]:
 
 def _safe_filename(name: str) -> str:
     return name.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
+
+
+def _validate_wav_path(path: Path) -> None:
+    if path.suffix != ".wav":
+        raise ValueError("audio file must use the canonical .wav extension")
 
 
 def _json_or_none(raw: str) -> dict[str, Any] | None:
