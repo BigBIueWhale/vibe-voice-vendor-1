@@ -6,8 +6,8 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
-from typing import Annotated
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
+from typing import Annotated, Protocol, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -33,6 +33,19 @@ _UPLOAD_DIR_PREFIX = "vvv-upload-"
 _UPLOAD_FILE_NAME = "audio.audio"
 
 
+class _CloseableFile(Protocol):
+    def close(self) -> object: ...
+
+
+def _close_multipart_parser_files(parser: MultiPartParser) -> None:
+    # Starlette closes these files for parser errors, but asyncio cancellation is
+    # a BaseException and bypasses that cleanup path.
+    files = cast(Iterable[_CloseableFile], getattr(parser, "_files_to_close_on_error", ()))
+    for file in files:
+        with contextlib.suppress(Exception):
+            file.close()
+
+
 async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, int]:
     upload_dir = tempfile.mkdtemp(prefix=_UPLOAD_DIR_PREFIX)
     path = os.path.join(upload_dir, _UPLOAD_FILE_NAME)
@@ -51,6 +64,9 @@ async def _spool_upload(upload: UploadFile, max_audio_bytes: int) -> tuple[str, 
         if total == 0:
             raise HTTPException(status_code=400, detail="Empty audio file")
         return path, total
+    except asyncio.CancelledError:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise
     except Exception:
         shutil.rmtree(upload_dir, ignore_errors=True)
         raise
@@ -98,6 +114,9 @@ async def _parse_transcribe_form(request: Request) -> FormData:
     )
     try:
         return await parser.parse()
+    except asyncio.CancelledError:
+        _close_multipart_parser_files(parser)
+        raise
     except MultiPartException as exc:
         if exc.message == "Request body too large":
             status_code = 413

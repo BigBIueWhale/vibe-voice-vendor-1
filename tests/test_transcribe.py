@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import httpx
 import pytest
@@ -423,6 +423,50 @@ class _StalledRequest:
         return self._stream()
 
 
+class _CancellingUpload:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def read(self, size: int) -> bytes:
+        _ = size
+        self.calls += 1
+        if self.calls == 1:
+            return b"partial audio"
+        raise asyncio.CancelledError
+
+
+class _FakeParserUploadFile:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _CancellingMultipartParser:
+    instances: ClassVar[list["_CancellingMultipartParser"]] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        _ = args, kwargs
+        self._files_to_close_on_error = [_FakeParserUploadFile(), _FakeParserUploadFile()]
+        self.instances.append(self)
+
+    async def parse(self) -> FormData:
+        raise asyncio.CancelledError
+
+
+class _FakeMultipartRequest:
+    def __init__(self, settings: Settings) -> None:
+        self.headers = {"content-type": "multipart/form-data; boundary=vvv"}
+        self.app = SimpleNamespace(state=SimpleNamespace(settings=settings))
+
+    async def _stream(self) -> AsyncIterator[bytes]:
+        yield b""
+
+    def stream(self) -> AsyncIterator[bytes]:
+        return self._stream()
+
+
 class _FakeTranscribeRequest:
     def __init__(self, settings: Settings, queue: TranscriptionQueue) -> None:
         self.app = SimpleNamespace(state=SimpleNamespace(settings=settings, queue=queue))
@@ -442,6 +486,37 @@ async def test_limited_request_stream_times_out_stalled_body(
         await anext(stream)
 
     assert request.closed
+
+
+async def test_parse_transcribe_form_cancellation_closes_starlette_upload_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _CancellingMultipartParser.instances.clear()
+    monkeypatch.setattr(transcribe_route, "MultiPartParser", _CancellingMultipartParser)
+    request = _FakeMultipartRequest(_make_all_settings(tmp_path))
+
+    with pytest.raises(asyncio.CancelledError):
+        await transcribe_route._parse_transcribe_form(cast(Request, request))
+
+    parser = _CancellingMultipartParser.instances[0]
+    assert all(file.closed for file in parser._files_to_close_on_error)
+
+
+async def test_spool_upload_cancellation_removes_private_temp_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+
+    with pytest.raises(asyncio.CancelledError):
+        await transcribe_route._spool_upload(
+            cast(UploadFile, _CancellingUpload()),
+            max_audio_bytes=1024,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_transcribe_stream_keeps_sse_connection_alive(
