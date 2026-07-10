@@ -3,9 +3,10 @@ import io
 import shutil
 import struct
 import tempfile
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
@@ -22,6 +23,7 @@ import server.routes.transcribe as transcribe_route
 from server.app import RequireHTTPSMiddleware, create_app
 from server.audio import probe_duration_file
 from server.config import Settings
+from server.models import JobStatus
 from server.queue import TranscriptionJob, TranscriptionQueue
 
 TEST_CLIENT_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -421,6 +423,14 @@ class _StalledRequest:
         return self._stream()
 
 
+class _FakeTranscribeRequest:
+    def __init__(self, settings: Settings, queue: TranscriptionQueue) -> None:
+        self.app = SimpleNamespace(state=SimpleNamespace(settings=settings, queue=queue))
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
 async def test_limited_request_stream_times_out_stalled_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -432,6 +442,44 @@ async def test_limited_request_stream_times_out_stalled_body(
         await anext(stream)
 
     assert request.closed
+
+
+async def test_transcribe_stream_keeps_sse_connection_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_probe_duration_file(path: str) -> float:
+        _ = path
+        return 1.0
+
+    monkeypatch.setattr(transcribe_route, "probe_duration_file", fake_probe_duration_file)
+    monkeypatch.setattr(transcribe_route, "_SSE_CHUNK_WAIT_SECONDS", 0.001)
+    monkeypatch.setattr(transcribe_route, "_SSE_KEEPALIVE_SECONDS", 0.001)
+    settings = _make_all_settings(tmp_path, max_queue_size=1)
+    queue = TranscriptionQueue(max_size=settings.max_queue_size)
+    request = _FakeTranscribeRequest(settings, queue)
+    upload = UploadFile(io.BytesIO(_make_wav(sample_rate=8000, num_samples=8000)), filename="x.wav")
+    job = TranscriptionJob(client_identity=TEST_CLIENT_IDENTITY)
+    queue.reserve(job)
+
+    response = await transcribe_route._transcribe_authenticated(
+        cast(Request, request),
+        upload,
+        job,
+        hotwords=None,
+    )
+    job.status = JobStatus.PROCESSING
+    stream = cast(AsyncGenerator[str, None], response.body_iterator)
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=1.0)
+        second = await asyncio.wait_for(anext(stream), timeout=1.0)
+    finally:
+        queue.cancel(job.job_id)
+        await stream.aclose()
+        await queue.stop()
+
+    assert first == ": accepted\n\n"
+    assert second == ": keepalive\n\n"
 
 
 async def test_queue_status_requires_client_identity(settings: Settings) -> None:

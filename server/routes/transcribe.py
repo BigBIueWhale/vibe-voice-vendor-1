@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Annotated
 
@@ -25,6 +26,8 @@ _MAX_MULTIPART_FIELDS = 1
 _MAX_FORM_FIELD_BYTES = 16 * 1024
 _MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 _REQUEST_BODY_CHUNK_TIMEOUT_SECONDS = 180.0
+_SSE_CHUNK_WAIT_SECONDS = 1.0
+_SSE_KEEPALIVE_SECONDS = 5.0
 _CONTROL_TOKEN_RE = re.compile(r"<\|[^>\r\n]{1,128}\|>")
 _UPLOAD_DIR_PREFIX = "vvv-upload-"
 _UPLOAD_FILE_NAME = "audio.audio"
@@ -198,6 +201,7 @@ async def _transcribe_authenticated(
 
     async def event_stream() -> AsyncIterator[str]:
         terminal = False
+        last_sent = time.monotonic()
         try:
             # Send initial queue position
             position, eta = queue.get_position_and_eta(job.job_id)
@@ -209,6 +213,10 @@ async def _transcribe_authenticated(
                     estimated_wait_seconds=eta,
                 )
                 yield f"event: queue\ndata: {event.model_dump_json()}\n\n"
+                last_sent = time.monotonic()
+            else:
+                yield ": accepted\n\n"
+                last_sent = time.monotonic()
 
             # Stream transcription chunks while polling for disconnects.
             while True:
@@ -217,14 +225,21 @@ async def _transcribe_authenticated(
                     terminal = True
                     return
                 try:
-                    chunk = await asyncio.wait_for(job.chunk_queue.get(), timeout=1.0)
+                    chunk = await asyncio.wait_for(
+                        job.chunk_queue.get(),
+                        timeout=_SSE_CHUNK_WAIT_SECONDS,
+                    )
                 except TimeoutError:
+                    if time.monotonic() - last_sent >= _SSE_KEEPALIVE_SECONDS:
+                        yield ": keepalive\n\n"
+                        last_sent = time.monotonic()
                     continue
                 if chunk is None:
                     break
 
                 chunk_event = TranscriptionChunkEvent(text=chunk)
                 yield f"data: {chunk_event.model_dump_json()}\n\n"
+                last_sent = time.monotonic()
 
             terminal = True
             if job.status == JobStatus.CANCELLED:
