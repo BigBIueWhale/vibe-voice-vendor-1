@@ -398,7 +398,6 @@ build_and_start_vibevoice_backend() {
         --uds "$BACKEND_SOCKET_CONTAINER" \
         --max-audio-bytes "$MAX_AUDIO_BYTES" \
         --max-queue-size "$MAX_QUEUE_SIZE" \
-        --require-https true \
         --vllm-model-name vibevoice \
         --vllm-temperature 0.0 \
         --vllm-top-p 1.0
@@ -489,8 +488,7 @@ ExecStart=$INSTALL_DIR/.venv/bin/python -m server \\
     --groq-model-name \${GROQ_MODEL_NAME} \\
     --uds $BACKEND_SOCKET_HOST \\
     --max-audio-bytes $MAX_AUDIO_BYTES \\
-    --max-queue-size $MAX_QUEUE_SIZE \\
-    --require-https true
+    --max-queue-size $MAX_QUEUE_SIZE
 Restart=always
 RestartSec=5
 UMask=077

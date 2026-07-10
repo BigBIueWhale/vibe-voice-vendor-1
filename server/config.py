@@ -8,7 +8,6 @@ class Settings(BaseModel):
     asr_backend: Literal["vibevoice", "groq"]
     max_audio_bytes: int
     max_queue_size: int
-    require_https: bool
     # vLLM / VibeVoice settings (used when asr_backend == "vibevoice")
     vllm_base_url: str
     vllm_model_name: str

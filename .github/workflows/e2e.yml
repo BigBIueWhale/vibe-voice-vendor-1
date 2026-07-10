@@ -55,7 +55,6 @@ jobs:
             --vllm-base-url "http://127.0.0.1:${{ env.MOCK_VLLM_PORT }}" \
             --max-audio-bytes 524288000 \
             --max-queue-size 50 \
-            --require-https true \
             --vllm-model-name vibevoice \
             --vllm-temperature 0.0 \
             --vllm-top-p 1.0 &

@@ -16,7 +16,6 @@ def settings(tmp_path: Path) -> Settings:
         vllm_base_url="http://127.0.0.1:9999",
         max_audio_bytes=500 * 1024 * 1024,
         max_queue_size=5,
-        require_https=False,
         vllm_model_name="vibevoice",
         vllm_temperature=0.0,
         vllm_top_p=1.0,

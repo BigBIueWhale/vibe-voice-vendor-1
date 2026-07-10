@@ -27,7 +27,9 @@ from server.models import JobStatus
 from server.queue import TranscriptionJob, TranscriptionQueue
 
 TEST_CLIENT_IDENTITY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+FORWARDED_HTTPS_HEADERS = {"X-Forwarded-Proto": "https"}
 CLIENT_IDENTITY_HEADERS = {"x-vvv-client-spki-sha256": TEST_CLIENT_IDENTITY}
+AUTH_HEADERS = {**CLIENT_IDENTITY_HEADERS, **FORWARDED_HTTPS_HEADERS}
 has_ffprobe = shutil.which("ffprobe") is not None
 
 
@@ -75,7 +77,6 @@ def _make_all_settings(tmp_path: Path, **overrides: object) -> Settings:
         "vllm_base_url": "http://127.0.0.1:37845",
         "max_audio_bytes": 500 * 1024 * 1024,
         "max_queue_size": 5,
-        "require_https": False,
         "vllm_model_name": "vibevoice",
         "vllm_temperature": 0.0,
         "vllm_top_p": 1.0,
@@ -152,7 +153,7 @@ def test_transcribe_route_has_no_fastapi_body_field(settings: Settings) -> None:
 
 async def test_transcribe_requires_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
-        resp = await client.post("/v1/transcribe")
+        resp = await client.post("/v1/transcribe", headers=FORWARDED_HTTPS_HEADERS)
         assert resp.status_code == 403
 
 
@@ -187,6 +188,7 @@ async def test_transcribe_missing_client_identity_does_not_parse_multipart(
     async with _lifespan_client(settings) as client:
         resp = await client.post(
             "/v1/transcribe",
+            headers=FORWARDED_HTTPS_HEADERS,
             files={"audio": ("test.wav", b"not audio", "audio/wav")},
         )
 
@@ -212,7 +214,7 @@ async def test_transcribe_body_limit_runs_before_spool_upload(
     async with _lifespan_client(s) as client:
         resp = await client.post(
             "/v1/transcribe",
-            headers=CLIENT_IDENTITY_HEADERS,
+            headers=AUTH_HEADERS,
             files={"audio": ("test.wav", oversized, "audio/wav")},
         )
 
@@ -243,7 +245,7 @@ async def test_transcribe_queue_full_does_not_parse_multipart(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/v1/transcribe",
-                headers=CLIENT_IDENTITY_HEADERS,
+                headers=AUTH_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
     finally:
@@ -273,7 +275,7 @@ async def test_transcribe_parse_failure_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers=CLIENT_IDENTITY_HEADERS,
+                headers=AUTH_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 400
@@ -300,7 +302,7 @@ async def test_transcribe_parser_storage_error_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers=CLIENT_IDENTITY_HEADERS,
+                headers=AUTH_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 507
@@ -327,7 +329,7 @@ async def test_transcribe_spool_storage_error_releases_reserved_upload_slot(
         for _ in range(2):
             resp = await client.post(
                 "/v1/transcribe",
-                headers=CLIENT_IDENTITY_HEADERS,
+                headers=AUTH_HEADERS,
                 files={"audio": ("test.wav", b"not audio", "audio/wav")},
             )
             assert resp.status_code == 507
@@ -399,7 +401,7 @@ async def test_transcribe_malformed_multipart_parser_error_is_400(
             resp = await client.post(
                 "/v1/transcribe",
                 headers={
-                    **CLIENT_IDENTITY_HEADERS,
+                    **AUTH_HEADERS,
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                 },
                 content=body,
@@ -559,7 +561,7 @@ async def test_transcribe_stream_keeps_sse_connection_alive(
 
 async def test_queue_status_requires_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
-        resp = await client.get("/v1/queue/status")
+        resp = await client.get("/v1/queue/status", headers=FORWARDED_HTTPS_HEADERS)
         assert resp.status_code == 403
 
 
@@ -567,7 +569,7 @@ async def test_queue_status_with_client_identity(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.get(
             "/v1/queue/status",
-            headers=CLIENT_IDENTITY_HEADERS,
+            headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -579,15 +581,15 @@ async def test_transcribe_empty_audio(settings: Settings) -> None:
     async with _lifespan_client(settings) as client:
         resp = await client.post(
             "/v1/transcribe",
-            headers=CLIENT_IDENTITY_HEADERS,
+            headers=AUTH_HEADERS,
             files={"audio": ("test.wav", b"", "audio/wav")},
         )
         assert resp.status_code == 400
 
 
-async def test_https_required_rejects_http(tmp_path: Path) -> None:
-    https_settings = _make_all_settings(tmp_path, require_https=True)
-    async with _lifespan_client(https_settings) as client:
+async def test_https_always_rejects_http(tmp_path: Path) -> None:
+    settings = _make_all_settings(tmp_path)
+    async with _lifespan_client(settings) as client:
         # No X-Forwarded-Proto header -> should be rejected
         resp = await client.get(
             "/v1/queue/status",
@@ -597,7 +599,7 @@ async def test_https_required_rejects_http(tmp_path: Path) -> None:
         assert "HTTPS" in resp.json()["detail"]
 
 
-async def test_https_required_rejects_invalid_forwarded_proto_bytes() -> None:
+async def test_https_always_rejects_invalid_forwarded_proto_bytes() -> None:
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         raise AssertionError("middleware forwarded malformed direct request")
 
@@ -622,25 +624,21 @@ async def test_https_required_rejects_invalid_forwarded_proto_bytes() -> None:
     assert messages[0]["status"] == 403
 
 
-async def test_https_required_allows_health(tmp_path: Path) -> None:
-    https_settings = _make_all_settings(
+async def test_https_always_allows_health(tmp_path: Path) -> None:
+    settings = _make_all_settings(
         tmp_path,
-        require_https=True,
         vllm_base_url="http://127.0.0.1:1",
     )
-    async with _lifespan_client(https_settings) as client:
+    async with _lifespan_client(settings) as client:
         resp = await client.get("/health")
         assert resp.status_code == 503
 
 
-async def test_https_required_passes_with_header(tmp_path: Path) -> None:
-    https_settings = _make_all_settings(tmp_path, require_https=True)
-    async with _lifespan_client(https_settings) as client:
+async def test_https_always_passes_with_header(tmp_path: Path) -> None:
+    settings = _make_all_settings(tmp_path)
+    async with _lifespan_client(settings) as client:
         resp = await client.get(
             "/v1/queue/status",
-            headers={
-                **CLIENT_IDENTITY_HEADERS,
-                "X-Forwarded-Proto": "https",
-            },
+            headers=AUTH_HEADERS,
         )
         assert resp.status_code == 200

@@ -471,8 +471,8 @@ def test_e2e_workflow_exercises_public_proxy_security_contract() -> None:
 
     assert "workflow_dispatch:" in workflow
     assert "--uds" in workflow
-    assert "--require-https true" in workflow
-    assert "--require-https false" not in workflow
+    removed_https_flag = "--require" + "-https"
+    assert removed_https_flag not in workflow
     assert "--upstream-uds" in workflow
     assert "--upstream-peer-uid" in workflow
     assert "--upstream-peer-gid" in workflow

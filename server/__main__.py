@@ -14,14 +14,6 @@ _UVICORN_LIMIT_CONCURRENCY = 128
 _UVICORN_HEADER_BYTES = 16 * 1024
 
 
-def _parse_bool(value: str) -> bool:
-    if value.lower() in ("true", "1", "yes"):
-        return True
-    if value.lower() in ("false", "0", "no"):
-        return False
-    raise argparse.ArgumentTypeError(f"Expected true/false, got: {value}")
-
-
 def _bind_private_uds(path: Path) -> socket.socket:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -64,12 +56,6 @@ def main() -> None:
     parser.add_argument(
         "--max-queue-size", type=int, required=True, help="Maximum number of queued jobs"
     )
-    parser.add_argument(
-        "--require-https",
-        type=_parse_bool,
-        required=True,
-        help="Reject non-HTTPS requests (true/false)",
-    )
     # vLLM / VibeVoice options (required when --asr-backend vibevoice)
     parser.add_argument("--vllm-base-url", default="", help="vLLM server base URL")
     parser.add_argument("--vllm-model-name", default="vibevoice", help="Model name for vLLM")
@@ -94,7 +80,6 @@ def main() -> None:
         asr_backend=args.asr_backend,
         max_audio_bytes=args.max_audio_bytes,
         max_queue_size=args.max_queue_size,
-        require_https=args.require_https,
         vllm_base_url=args.vllm_base_url,
         vllm_model_name=args.vllm_model_name,
         vllm_temperature=args.vllm_temperature,

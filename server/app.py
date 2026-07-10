@@ -92,7 +92,6 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(queue_status.router)
     app.include_router(health.router)
 
-    if settings.require_https:
-        app.add_middleware(RequireHTTPSMiddleware)
+    app.add_middleware(RequireHTTPSMiddleware)
 
     return app
