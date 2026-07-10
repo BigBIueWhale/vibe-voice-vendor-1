@@ -108,21 +108,21 @@ vvv --server https://HOST:42862 \
   --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
-  transcribe sample/recording_with_hebrew.wav
+  transcribe path/to/heliboard-recording.wav
 
 # With hotwords
 vvv --server https://HOST:42862 \
   --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
-  transcribe sample/recording_with_hebrew.wav --hotwords "VibeVoice,ASR"
+  transcribe path/to/heliboard-recording.wav --hotwords "VibeVoice,ASR"
 
 # Save to file
 vvv --server https://HOST:42862 \
   --server-pin "$(cat certs/self-signed/server-spki-pin.txt)" \
   --client-cert keys/client-cert.pem \
   --client-key keys/client-key.pem \
-  transcribe sample/recording_with_hebrew.wav --output transcript.txt
+  transcribe path/to/heliboard-recording.wav --output transcript.txt
 
 # Check queue status
 vvv --server https://HOST:42862 \
@@ -149,7 +149,7 @@ async def main():
         cert=("keys/client-cert.pem", "keys/client-key.pem"),
     )
 
-    async for event in client.transcribe("sample/recording_with_hebrew.wav"):
+    async for event in client.transcribe("path/to/heliboard-recording.wav"):
         if event.event_type == EventType.QUEUE:
             print(f"Queue position: {event.position}")
         elif event.event_type == EventType.DATA:
@@ -168,7 +168,7 @@ asyncio.run(main())
 | GET | `/v1/queue/status` | mTLS | Get your queue position and job status |
 | GET | `/health` | mTLS | Proxy-local liveness check; does not reach FastAPI or vLLM |
 
-`POST /v1/transcribe` accepts exactly one `audio` file part and optionally one `hotwords` text part. The `audio` filename must end in `.wav`, its part `Content-Type` must be `audio/wav`, and the bytes must be HeliBoard's canonical 44-byte-header WAV shape: RIFF/WAVE PCM, mono, 16 kHz, 16-bit little-endian, data chunk at byte 36, and declared sizes matching the actual file length.
+`POST /v1/transcribe` accepts exactly one `audio` file part and optionally one `hotwords` text part. The `audio` filename must end in `.wav`, its part `Content-Type` must be `audio/wav`, and the bytes must be HeliBoard's canonical 44-byte-header WAV shape: RIFF/WAVE PCM, mono, 16 kHz, 16-bit little-endian, data chunk at byte 36, and declared sizes matching the actual file length. The files under `sample/` are model-quality fixtures, not public API upload fixtures.
 
 ### curl
 
@@ -196,7 +196,7 @@ curl --insecure \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N \
-  -F "audio=@sample/recording_with_hebrew.wav;type=audio/wav" \
+  -F "audio=@path/to/heliboard-recording.wav;type=audio/wav" \
   https://HOST:42862/v1/transcribe
 
 # Transcribe with hotwords
@@ -205,7 +205,7 @@ curl --insecure \
   --cert keys/client-cert.pem \
   --key keys/client-key.pem \
   -s -N \
-  -F "audio=@sample/recording_with_hebrew.wav;type=audio/wav" \
+  -F "audio=@path/to/heliboard-recording.wav;type=audio/wav" \
   -F "hotwords=VibeVoice,ASR" \
   https://HOST:42862/v1/transcribe
 ```
