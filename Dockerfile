@@ -1,12 +1,175 @@
+FROM vllm/vllm-openai:v0.14.1@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c AS ffmpeg-builder
+
+ARG FFMPEG_VERSION=8.1.2
+ARG FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
+ARG FFMPEG_SIGNING_KEY=FCF986EA15E6E293A5644F10B4322F04D67658D8
+ENV FFMPEG_PREFIX=/opt/vvv-ffmpeg
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        build-essential \
+        gnupg \
+        xz-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    curl -fsSLo /tmp/ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"; \
+    curl -fsSLo /tmp/ffmpeg.tar.xz.asc "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc"; \
+    curl -fsSLo /tmp/ffmpeg-devel.asc "https://ffmpeg.org/ffmpeg-devel.asc"; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    gpg --batch --import /tmp/ffmpeg-devel.asc; \
+    gpg --batch --fingerprint --with-colons "$FFMPEG_SIGNING_KEY" | grep -q "^fpr:::::::::${FFMPEG_SIGNING_KEY}:"; \
+    gpg --batch --verify /tmp/ffmpeg.tar.xz.asc /tmp/ffmpeg.tar.xz; \
+    echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -; \
+    rm -rf "$GNUPGHOME"; \
+    mkdir -p /tmp/ffmpeg-src; \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-src --strip-components=1; \
+    cd /tmp/ffmpeg-src; \
+    ./configure \
+        --prefix="$FFMPEG_PREFIX" \
+        --disable-doc \
+        --disable-debug \
+        --disable-network \
+        --disable-autodetect \
+        --disable-everything \
+        --disable-x86asm \
+        --disable-ffplay \
+        --disable-avdevice \
+        --disable-swscale \
+        --enable-ffmpeg \
+        --enable-ffprobe \
+        --enable-protocol=file,pipe \
+        --enable-demuxer=wav,mp3,mov,flac,ogg,matroska,asf,aac \
+        --enable-muxer=pcm_s16le,null \
+        --enable-decoder=aac,aac_fixed,aac_latm,alac,flac,mp3,mp3float,opus,vorbis,speex,wmav1,wmav2,wmapro,wmalossless,wmavoice,pcm_alaw,pcm_mulaw,pcm_f32be,pcm_f32le,pcm_f64be,pcm_f64le,pcm_s16be,pcm_s16be_planar,pcm_s16le,pcm_s16le_planar,pcm_s24be,pcm_s24le,pcm_s24le_planar,pcm_s32be,pcm_s32le,pcm_s32le_planar,pcm_s8,pcm_u8,pcm_u16be,pcm_u16le,pcm_u24be,pcm_u24le,pcm_u32be,pcm_u32le,adpcm_ms,adpcm_ima_wav,adpcm_g722,adpcm_g726,adpcm_g726le,adpcm_yamaha \
+        --enable-encoder=pcm_s16le \
+        --enable-parser=aac,aac_latm,flac,mpegaudio,opus,vorbis \
+        --enable-filter=aresample,aformat,anull,pan,channelmap; \
+    make -j"$(nproc)"; \
+    make install; \
+    rm -rf /tmp/ffmpeg-src /tmp/ffmpeg.tar.xz /tmp/ffmpeg.tar.xz.asc /tmp/ffmpeg-devel.asc
+
+RUN python3 - <<'PY'
+import json
+import math
+import re
+import struct
+import subprocess
+import wave
+from pathlib import Path
+
+BIN = Path("/opt/vvv-ffmpeg/bin")
+
+
+def run(args: list[str]) -> str:
+    return subprocess.check_output(args, stderr=subprocess.STDOUT, text=True)
+
+
+def has_line(output: str, pattern: str) -> bool:
+    return re.search(pattern, output, re.MULTILINE) is not None
+
+
+buildconf = run([str(BIN / "ffmpeg"), "-hide_banner", "-buildconf"])
+required_flags = [
+    "--disable-network",
+    "--disable-autodetect",
+    "--disable-everything",
+    "--disable-avdevice",
+    "--disable-swscale",
+    "--enable-protocol='file,pipe'",
+]
+for flag in required_flags:
+    if flag not in buildconf:
+        raise RuntimeError(f"minimal FFmpeg build is missing {flag}")
+
+protocols = run([str(BIN / "ffmpeg"), "-hide_banner", "-protocols"])
+for protocol in ("file", "pipe"):
+    if not has_line(protocols, rf"^\s*{protocol}\s*$"):
+        raise RuntimeError(f"minimal FFmpeg build is missing {protocol} protocol")
+for protocol in ("http", "https", "tcp", "udp", "tls", "data", "concat", "subfile", "crypto"):
+    if has_line(protocols, rf"^\s*{protocol}\s*$"):
+        raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {protocol} protocol")
+
+demuxers = run([str(BIN / "ffmpeg"), "-hide_banner", "-demuxers"])
+for demuxer in ("wav", "mp3", "mov", "flac", "ogg", "matroska", "asf", "aac"):
+    if not has_line(demuxers, rf"^\s*D\s+{demuxer}\b"):
+        raise RuntimeError(f"minimal FFmpeg build is missing {demuxer} demuxer")
+for demuxer in ("hls", "concat", "dash", "rtsp", "image2", "mpegts"):
+    if has_line(demuxers, rf"^\s*D\s+{demuxer}\b"):
+        raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {demuxer} demuxer")
+
+decoders = run([str(BIN / "ffmpeg"), "-hide_banner", "-decoders"])
+for decoder in ("aac", "flac", "mp3", "opus", "vorbis", "pcm_s16le"):
+    if not has_line(decoders, rf"^ A.*D\s+{decoder}\b"):
+        raise RuntimeError(f"minimal FFmpeg build is missing {decoder} decoder")
+for decoder in ("jpeg2000", "pgm", "ppm", "pnm", "png", "gif", "webp", "h264", "hevc", "av1", "als"):
+    if has_line(decoders, rf"^.{{6}}\s+{decoder}\b"):
+        raise RuntimeError(f"minimal FFmpeg build unexpectedly enables {decoder} decoder")
+
+wav_path = Path("/tmp/ffmpeg-smoke.wav")
+with wave.open(str(wav_path), "wb") as f:
+    f.setnchannels(1)
+    f.setsampwidth(2)
+    f.setframerate(16000)
+    frames = bytearray()
+    for i in range(16000):
+        sample = int(math.sin(i / 16000 * 2 * math.pi * 440) * 8000)
+        frames.extend(struct.pack("<h", sample))
+    f.writeframes(bytes(frames))
+
+pcm = subprocess.check_output([
+    str(BIN / "ffmpeg"),
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-protocol_whitelist",
+    "file,pipe",
+    "-i",
+    str(wav_path),
+    "-f",
+    "s16le",
+    "-ac",
+    "1",
+    "-acodec",
+    "pcm_s16le",
+    "-ar",
+    "24000",
+    "-",
+])
+if len(pcm) != 48000:
+    raise RuntimeError(f"minimal FFmpeg decode smoke test returned {len(pcm)} bytes")
+
+probe = run([
+    str(BIN / "ffprobe"),
+    "-v",
+    "quiet",
+    "-protocol_whitelist",
+    "file",
+    "-print_format",
+    "json",
+    "-show_format",
+    str(wav_path),
+])
+duration = float(json.loads(probe)["format"]["duration"])
+if not 0.99 <= duration <= 1.01:
+    raise RuntimeError(f"minimal FFprobe smoke test returned duration {duration!r}")
+PY
+
 FROM vllm/vllm-openai:v0.14.1@sha256:6bf34e50e2387dc46dc87a9d6a945fdd616a022bccfddd949052f54063ebcb8c
 
 ARG VIBEVOICE_MODEL_REVISION=d0c9efdb8d614685062c04425d91e01b6f37d944
 ENV VIBEVOICE_MODEL_REVISION=${VIBEVOICE_MODEL_REVISION}
+ENV PATH=/opt/vvv-ffmpeg/bin:${PATH}
 
 # ── Layer 1: System packages ─────────────────────────────────────────
+COPY --from=ffmpeg-builder /opt/vvv-ffmpeg /opt/vvv-ffmpeg
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg libsndfile1 && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends libsndfile1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    test "$(command -v ffmpeg)" = "/opt/vvv-ffmpeg/bin/ffmpeg" && \
+    test "$(command -v ffprobe)" = "/opt/vvv-ffmpeg/bin/ffprobe"
 
 # ── Layer 2: Model weights (~14 GB, cached independently of source) ──
 RUN python3 -c "\

@@ -581,6 +581,87 @@ def test_vllm_audio_runtime_dependencies_are_pinned_and_verified() -> None:
     assert "vLLM audio dependency" in dockerfile
 
 
+def test_runtime_image_uses_pinned_minimal_ffmpeg_not_distro_package() -> None:
+    dockerfile = _read("Dockerfile")
+    setup = _read("setup.sh")
+    docs = _read("README.md")
+
+    assert "ARG FFMPEG_VERSION=8.1.2" in dockerfile
+    assert (
+        "ARG FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
+        in dockerfile
+    )
+    assert "ARG FFMPEG_SIGNING_KEY=FCF986EA15E6E293A5644F10B4322F04D67658D8" in dockerfile
+    assert "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" in dockerfile
+    assert "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" in dockerfile
+    assert "https://ffmpeg.org/ffmpeg-devel.asc" in dockerfile
+    assert "gpg --batch --verify /tmp/ffmpeg.tar.xz.asc /tmp/ffmpeg.tar.xz" in dockerfile
+    assert "sha256sum -c -" in dockerfile
+
+    assert "apt-get install -y --no-install-recommends ffmpeg" not in dockerfile
+    assert "apt-get install -y --no-install-recommends libsndfile1" in dockerfile
+    assert "ENV PATH=/opt/vvv-ffmpeg/bin:${PATH}" in dockerfile
+    assert 'test "$(command -v ffmpeg)" = "/opt/vvv-ffmpeg/bin/ffmpeg"' in dockerfile
+    assert 'test "$(command -v ffprobe)" = "/opt/vvv-ffmpeg/bin/ffprobe"' in dockerfile
+
+    for required in [
+        "--disable-network",
+        "--disable-autodetect",
+        "--disable-everything",
+        "--disable-avdevice",
+        "--disable-swscale",
+        "--enable-protocol=file,pipe",
+        "--enable-demuxer=wav,mp3,mov,flac,ogg,matroska,asf,aac",
+        "--enable-muxer=pcm_s16le,null",
+        "--enable-encoder=pcm_s16le",
+        "--enable-parser=aac,aac_latm,flac,mpegaudio,opus,vorbis",
+        "--enable-filter=aresample,aformat,anull,pan,channelmap",
+    ]:
+        assert required in dockerfile
+
+    for expected_decoder in [
+        "aac",
+        "alac",
+        "flac",
+        "mp3",
+        "mp3float",
+        "opus",
+        "vorbis",
+        "speex",
+        "wmav1",
+        "wmav2",
+        "wmapro",
+        "wmalossless",
+        "wmavoice",
+        "pcm_s16le",
+        "adpcm_ms",
+        "adpcm_ima_wav",
+    ]:
+        assert expected_decoder in dockerfile
+
+    for forbidden in [
+        "--enable-protocol=http",
+        "--enable-protocol=https",
+        "--enable-protocol=tcp",
+        "--enable-protocol=udp",
+        "--enable-protocol=data",
+        "--enable-demuxer=hls",
+        "--enable-demuxer=concat",
+        "--enable-demuxer=image2",
+        "--enable-decoder=jpeg2000",
+        "--enable-decoder=png",
+        "--enable-decoder=h264",
+        "--enable-decoder=hevc",
+    ]:
+        assert forbidden not in dockerfile
+
+    assert "minimal FFmpeg build unexpectedly enables" in dockerfile
+    assert "minimal FFmpeg decode smoke test returned" in dockerfile
+    assert "minimal-pinned-ffmpeg-audio-surface-v5" in setup
+    assert "official FFmpeg `8.1.2`" in docs
+    assert "Ubuntu's broad `ffmpeg` package" in docs
+
+
 def test_vibevoice_ffmpeg_decode_is_bounded_in_runtime_image() -> None:
     dockerfile = _read("Dockerfile")
 
