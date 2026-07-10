@@ -625,6 +625,8 @@ fn build_tls_config(
             .with_single_cert(cert_chain, key)
             .map_err(|e| format!("Failed to build TLS 1.3-only server config: {e}"))?;
     config.alpn_protocols = vec![TLS_ALPN_HTTP1.to_vec()];
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
     Ok(config)
 }
 
@@ -1670,6 +1672,8 @@ mod tests {
         let config =
             build_tls_config(&cert_path, &key_path, &client_ca_path).expect("build mTLS config");
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert_eq!(config.send_tls13_tickets, 0);
+        assert!(!config.session_storage.can_cache());
 
         let _ = fs::remove_dir_all(&dir);
     }
