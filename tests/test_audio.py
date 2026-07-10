@@ -44,6 +44,21 @@ class _HangingProcess:
         self.returncode = -9
 
 
+class _CancelledProcess:
+    def __init__(self) -> None:
+        self.killed = False
+        self.returncode: int | None = None
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self.killed:
+            return b"", b""
+        raise asyncio.CancelledError
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
 def _make_wav(sample_rate: int = 16000, num_samples: int = 16000, num_channels: int = 1) -> bytes:
     """Create a minimal valid WAV file."""
     bits_per_sample = 16
@@ -234,6 +249,25 @@ async def test_compress_timeout_kills_ffmpeg(
     monkeypatch.setattr("server.audio._FFMPEG_TIMEOUT_SECONDS", 0.001)
 
     with pytest.raises(RuntimeError, match="ffmpeg opus compression timed out"):
+        await compress_file_to_opus(str(src))
+
+    assert process.killed
+
+
+async def test_compress_cancellation_kills_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _CancelledProcess()
+    src = tmp_path / "audio.wav"
+    src.write_bytes(b"fake audio")
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> _CancelledProcess:
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    with pytest.raises(asyncio.CancelledError):
         await compress_file_to_opus(str(src))
 
     assert process.killed

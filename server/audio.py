@@ -30,15 +30,21 @@ async def _communicate_or_kill(
     timeout_seconds: float,
     operation: str,
 ) -> tuple[bytes, bytes]:
-    try:
-        return await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-    except TimeoutError:
+    async def kill_and_drain() -> None:
         with contextlib.suppress(ProcessLookupError):
             process.kill()
         with contextlib.suppress(Exception):
             await process.communicate()
+
+    try:
+        return await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except TimeoutError:
+        await kill_and_drain()
         timeout_label = f"{timeout_seconds:.3g}"
         raise RuntimeError(f"{operation} timed out after {timeout_label} seconds") from None
+    except asyncio.CancelledError:
+        await kill_and_drain()
+        raise
 
 
 def encode_audio_base64(raw_bytes: bytes) -> str:
