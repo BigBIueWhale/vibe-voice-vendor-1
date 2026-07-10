@@ -105,6 +105,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "keep-alive",
     "transfer-encoding",
     "te",
+    "trailer",
     "trailers",
     "upgrade",
     "proxy-authorization",
@@ -148,6 +149,7 @@ const HTTP1_MAX_HEADERS: usize = 32;
 const HTTP1_MAX_BUFFER_BYTES: usize = 32 * 1024;
 const MAX_PUBLIC_CONNECTIONS: usize = 128;
 const TCP_LISTEN_BACKLOG: u32 = MAX_PUBLIC_CONNECTIONS as u32;
+const TCP_DEFER_ACCEPT_SECONDS: i32 = 3;
 const TLS_ALPN_HTTP1: &[u8] = b"http/1.1";
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_CERT_COMMON_NAME: &str = "VVV Sovereign Server";
@@ -157,6 +159,48 @@ const CLIENT_IDENTITY_HEADER: &str = "x-vvv-client-spki-sha256";
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
 type SharedTlsConfig = Arc<RwLock<Arc<rustls::ServerConfig>>>;
+
+pin_project_lite::pin_project! {
+    struct StripTrailers<B> {
+        #[pin]
+        inner: B,
+    }
+}
+
+impl<B> StripTrailers<B> {
+    fn new(inner: B) -> Self {
+        Self { inner }
+    }
+}
+
+impl<B> HttpBody for StripTrailers<B>
+where
+    B: HttpBody,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let mut this = self.project();
+        match this.inner.as_mut().poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) if frame.is_trailers() => {
+                std::task::Poll::Ready(None)
+            }
+            result => result,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
 
 // ============================================================================
 // Security Headers
@@ -254,7 +298,35 @@ fn bind_public_listener(addr: SocketAddr) -> io::Result<std::net::TcpListener> {
     let socket = TcpSocket::new_v4()?;
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
-    socket.listen(TCP_LISTEN_BACKLOG)?.into_std()
+    let listener = socket.listen(TCP_LISTEN_BACKLOG)?.into_std()?;
+    set_tcp_defer_accept(&listener)?;
+    Ok(listener)
+}
+
+#[cfg(target_os = "linux")]
+fn set_tcp_defer_accept(listener: &std::net::TcpListener) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let seconds: libc::c_int = TCP_DEFER_ACCEPT_SECONDS;
+    let result = unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_DEFER_ACCEPT,
+            (&seconds as *const libc::c_int).cast::<libc::c_void>(),
+            std::mem::size_of_val(&seconds) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_tcp_defer_accept(_listener: &std::net::TcpListener) -> io::Result<()> {
+    Ok(())
 }
 
 fn try_public_connection_permit(permits: &Arc<Semaphore>) -> io::Result<OwnedSemaphorePermit> {
@@ -900,7 +972,7 @@ where
     }
 
     // Stream request body to upstream without buffering (avoids holding up to 500 MB in memory).
-    let limited_body = Limited::new(req.into_body(), state.max_body_size);
+    let limited_body = StripTrailers::new(Limited::new(req.into_body(), state.max_body_size));
     // Remove Content-Length since the body is now streamed with chunked encoding.
     upstream_headers.remove(header::CONTENT_LENGTH);
 
@@ -1344,6 +1416,10 @@ mod tests {
         polls: Arc<AtomicUsize>,
     }
 
+    struct DataThenTrailerBody {
+        step: u8,
+    }
+
     impl HttpBody for CountingBody {
         type Data = Bytes;
         type Error = Infallible;
@@ -1361,6 +1437,40 @@ mod tests {
 
     fn body_that_counts_polls(polls: Arc<AtomicUsize>) -> CountingBody {
         CountingBody { polls }
+    }
+
+    fn data_then_trailer_body() -> DataThenTrailerBody {
+        DataThenTrailerBody { step: 0 }
+    }
+
+    impl HttpBody for DataThenTrailerBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let body = self.get_mut();
+            match body.step {
+                0 => {
+                    body.step = 1;
+                    Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"visible")))))
+                }
+                1 => {
+                    body.step = 2;
+                    let mut trailers = HeaderMap::new();
+                    trailers.insert(
+                        HeaderName::from_static(CLIENT_IDENTITY_HEADER),
+                        HeaderValue::from_static(
+                            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        ),
+                    );
+                    Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+                }
+                _ => Poll::Ready(None),
+            }
+        }
     }
 
     fn empty_request_body() -> Empty<Bytes> {
@@ -1407,6 +1517,48 @@ mod tests {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_ne!(addr.port(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn proxy_public_listener_defers_empty_tcp_accepts() {
+        use std::os::fd::AsRawFd;
+
+        let listener = bind_public_listener(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("bind public listener");
+        let mut seconds: libc::c_int = 0;
+        let mut len = std::mem::size_of_val(&seconds) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                listener.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_DEFER_ACCEPT,
+                (&mut seconds as *mut libc::c_int).cast::<libc::c_void>(),
+                &mut len,
+            )
+        };
+
+        assert_eq!(result, 0, "getsockopt TCP_DEFER_ACCEPT failed");
+        assert!(seconds > 0, "TCP_DEFER_ACCEPT must be enabled");
+    }
+
+    #[test]
+    fn proxy_treats_trailer_as_hop_by_hop_header() {
+        assert!(is_hop_by_hop_header(&header::TRAILER, &HashSet::new()));
+    }
+
+    #[tokio::test]
+    async fn proxy_request_body_strips_trailer_frames() {
+        let mut body = Box::pin(StripTrailers::new(data_then_trailer_body()));
+        let first = futures::future::poll_fn(|cx| body.as_mut().poll_frame(cx))
+            .await
+            .expect("first frame")
+            .expect("first frame ok");
+        let data = first.into_data().expect("data frame");
+        assert_eq!(data.as_ref(), b"visible");
+
+        let second = futures::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await;
+        assert!(second.is_none(), "trailer frame must be dropped");
     }
 
     #[test]
@@ -1807,6 +1959,93 @@ mod tests {
             response.headers().get("x-keep-response"),
             Some(&HeaderValue::from_static("visible"))
         );
+        let body = response_body_bytes(response, 1024).await;
+        assert_eq!(body.as_ref(), b"ok");
+        upstream.await.expect("upstream task");
+    }
+
+    #[tokio::test]
+    async fn proxy_drops_trailers_before_unix_socket_upstream() {
+        use tokio::net::UnixListener;
+
+        let files = TestFiles::new();
+        let socket_path = files.dir.join("upstream-trailer.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind test UDS");
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("set test UDS permissions");
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept UDS request");
+            let service = service_fn(|mut req: Request<Incoming>| async move {
+                assert_eq!(req.method(), Method::POST);
+                assert_eq!(req.uri().path(), "/v1/transcribe");
+                assert!(req.headers().get(header::TRAILER).is_none());
+                assert_eq!(
+                    req.headers().get(CLIENT_IDENTITY_HEADER),
+                    Some(&HeaderValue::from_static(TEST_CLIENT_IDENTITY))
+                );
+
+                let mut saw_body = false;
+                let mut saw_trailers = false;
+                while let Some(frame) = req.body_mut().frame().await {
+                    let frame = frame.expect("upstream body frame");
+                    match frame.into_data() {
+                        Ok(data) => saw_body |= !data.is_empty(),
+                        Err(frame) => {
+                            if frame.is_trailers() {
+                                saw_trailers = true;
+                            }
+                        }
+                    }
+                }
+                assert!(saw_body, "request data must still be forwarded");
+                assert!(!saw_trailers, "request trailers must not reach upstream");
+
+                Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .expect("serve upstream HTTP/1");
+        });
+
+        let state = AppState::new(
+            UpstreamTarget {
+                socket_path,
+                host_header: UDS_UPSTREAM_AUTHORITY.to_string(),
+                expected_peer_uid: files.uid(),
+                expected_peer_gid: files.gid(),
+            },
+            1024,
+        );
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            HeaderName::from_static(CLIENT_IDENTITY_HEADER),
+            HeaderValue::from_static(
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/transcribe")
+            .header(header::TRAILER, CLIENT_IDENTITY_HEADER)
+            .header(
+                CLIENT_IDENTITY_HEADER,
+                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )
+            .body(
+                Full::new(Bytes::from_static(b"audio"))
+                    .with_trailers(std::future::ready(Some(Ok::<_, Infallible>(trailers)))),
+            )
+            .expect("request");
+
+        let response = proxy_handler_inner(
+            state,
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+            TEST_CLIENT_IDENTITY.to_string(),
+            req,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response_body_bytes(response, 1024).await;
         assert_eq!(body.as_ref(), b"ok");
         upstream.await.expect("upstream task");

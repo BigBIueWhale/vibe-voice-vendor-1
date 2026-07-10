@@ -37,6 +37,8 @@ base64 = "=0.22.1"
 
 # Async future utilities
 futures = "=0.3.32"
+libc = "=0.2.186"
+pin-project-lite = "=0.2.17"
 
 # Body collection for HTTP proxying
 http-body-util = "=0.1.3"
